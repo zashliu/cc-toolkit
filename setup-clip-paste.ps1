@@ -37,17 +37,36 @@ Write-Host "AutoHotkey: $ahk" -ForegroundColor Green
 $savePs = Join-Path $dir 'save-clip-image.ps1'
 @'
 # Saves the clipboard image to a PNG and replaces the clipboard with its path.
-# Exit 0 = image saved & path copied; Exit 1 = no image in clipboard.
+# Retries ride out the race where the screenshot tool is still writing the
+# clipboard, or it is briefly locked by another process (the "works sometimes" bug).
+# Exit 0 = image saved & path copied; Exit 1 = no image after retries.
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
-$img = [System.Windows.Forms.Clipboard]::GetImage()
+function Get-ClipImage {
+    for ($i = 0; $i -lt 20; $i++) {
+        try {
+            $im = [System.Windows.Forms.Clipboard]::GetImage()
+            if ($null -ne $im) { return $im }
+        } catch { }
+        Start-Sleep -Milliseconds 50
+    }
+    return $null
+}
+$img = Get-ClipImage
 if ($null -eq $img) { exit 1 }
 $d = Join-Path $env:TEMP 'cc-clip'
 if (-not (Test-Path $d)) { New-Item -ItemType Directory -Path $d | Out-Null }
+# Expand any 8.3 short name (e.g. ADMINI~1) to the full path so the displayed path is clean.
+$sig = '[DllImport("kernel32.dll", CharSet=CharSet.Unicode)] public static extern int GetLongPathName(string s, System.Text.StringBuilder b, int len);'
+Add-Type -MemberDefinition $sig -Name LP -Namespace W32 | Out-Null
+$sb = New-Object System.Text.StringBuilder 1024
+if ([W32.LP]::GetLongPathName($d, $sb, $sb.Capacity) -gt 0) { $d = $sb.ToString() }
 $path = Join-Path $d ("clip_{0}.png" -f (Get-Date -Format 'yyyyMMdd_HHmmss_fff'))
 $img.Save($path, [System.Drawing.Imaging.ImageFormat]::Png)
 $img.Dispose()
-Set-Clipboard -Value $path
+for ($i = 0; $i -lt 20; $i++) {
+    try { Set-Clipboard -Value $path; break } catch { Start-Sleep -Milliseconds 50 }
+}
 exit 0
 '@ | Set-Content -Path $savePs -Encoding UTF8
 Write-Host "Wrote $savePs" -ForegroundColor Green
@@ -61,15 +80,30 @@ $ahkScript = Join-Path $dir 'clip-paste.ahk'
 ; save it to a PNG, put the file path on the clipboard, then paste the path.
 ; Claude Code reads the pasted image-file path and loads the image.
 ; Non-image clipboard content pastes as usual.
+; The probe/wait loops ride out the race where the screenshot tool is still
+; writing the clipboard or it is briefly locked -- the "works sometimes" bug.
 psScript := A_ScriptDir "\save-clip-image.ps1"
 #HotIf WinActive("ahk_exe WindowsTerminal.exe")
 ^v:: {
     global psScript
-    hasImage := DllCall("IsClipboardFormatAvailable", "UInt", 8)   ; CF_DIB
-               || DllCall("IsClipboardFormatAvailable", "UInt", 2)  ; CF_BITMAP
+    ; The clipboard can be briefly locked right after a screenshot; retry the probe.
+    hasImage := false
+    Loop 10 {
+        if (DllCall("IsClipboardFormatAvailable", "UInt", 8)   ; CF_DIB
+            || DllCall("IsClipboardFormatAvailable", "UInt", 2)) {  ; CF_BITMAP
+            hasImage := true
+            break
+        }
+        Sleep 30
+    }
     if (hasImage) {
         RunWait('powershell.exe -NoProfile -Sta -ExecutionPolicy Bypass -WindowStyle Hidden -File "' psScript '"', , "Hide")
-        Sleep 30
+        ; Wait until the path text has actually replaced the image on the clipboard.
+        Loop 40 {
+            if (A_Clipboard ~= "i)\.png$")
+                break
+            Sleep 25
+        }
     }
     Send("^v")
 }
