@@ -29,7 +29,7 @@ powershell -ExecutionPolicy Bypass -File .\setup-clip-paste.ps1
 1. 用 winget 安装 AutoHotkey v2（已装则跳过）
 2. 在 `%USERPROFILE%\.cc-clippaste\` 生成 `clip-paste.ahk` 和 `save-clip-image.ps1`
 3. 在启动文件夹建快捷方式（开机自启）
-4. 在 Windows Terminal 的 `settings.json` 里解绑 Ctrl+V
+4. 在 Windows Terminal 的 `settings.json` 里把 Ctrl+V 绑定为 `paste`（拦截脚本末尾的 `Send("^v")` 要靠它才能粘贴）
 5. 立即启动拦截脚本
 
 ### 使用
@@ -42,10 +42,11 @@ powershell -ExecutionPolicy Bypass -File .\setup-clip-paste.ps1
 - 临时图片存在 `%TEMP%\cc-clip\`，可随时清空，不影响功能。
 - 没反应时先看托盘里有没有 AutoHotkey 绿色 H 图标；没有就手动运行
   `%USERPROFILE%\.cc-clippaste\clip-paste.ahk`，或重跑安装脚本。
-- 第 4 步若提示无法自动改 `settings.json`，手动在 Windows Terminal 设置里把
-  Ctrl+V 解绑（unbound）即可。
-- 卸载：删掉启动文件夹里的 `cc-clip-paste.lnk` 和 `%USERPROFILE%\.cc-clippaste\`，
-  并把 Windows Terminal 的 Ctrl+V 改回 `paste`。
+- 第 4 步若提示无法自动改 `settings.json`，手动在 Windows Terminal 设置里确认
+  Ctrl+V 绑定为 `paste`（**不要解绑/unbound**，否则 `Send("^v")` 粘贴不了，
+  表现为「按 Ctrl+V 完全没反应」）。
+- 卸载：删掉启动文件夹里的 `cc-clip-paste.lnk` 和 `%USERPROFILE%\.cc-clippaste\` 即可
+  （WT 的 Ctrl+V 保持 `paste` 不用动）。
 
 > 注意：这套功能是**操作系统层面**的配置，不随 Claude Code 账号同步——
 > 跨设备靠的是本仓库 + 在每台机器上跑一次安装脚本。

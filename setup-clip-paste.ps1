@@ -122,7 +122,10 @@ $sc.Description = 'Ctrl+V image paste for Claude Code in Windows Terminal'
 $sc.Save()
 Write-Host "Startup shortcut: $lnk" -ForegroundColor Green
 
-# --- 5. Unbind Ctrl+V in Windows Terminal so the key reaches the app ---
+# --- 5. Bind Ctrl+V -> paste in Windows Terminal -----------------------
+# The interceptor ends with Send("^v"); that synthetic Ctrl+V only pastes if WT
+# has ctrl+v bound to "paste". Leaving it unbound makes the paste do nothing --
+# the recurring "paste stopped working" bug. So bind it explicitly here.
 $wtPaths = @(
     "$env:LOCALAPPDATA\Packages\Microsoft.WindowsTerminal_8wekyb3d8bbwe\LocalState\settings.json",
     "$env:LOCALAPPDATA\Packages\Microsoft.WindowsTerminalPreview_8wekyb3d8bbwe\LocalState\settings.json",
@@ -132,20 +135,23 @@ foreach ($wt in $wtPaths) {
     if (-not (Test-Path $wt)) { continue }
     try {
         $json = Get-Content $wt -Raw | ConvertFrom-Json
-        $kept = @()
-        if ($json.PSObject.Properties.Name -contains 'keybindings' -and $json.keybindings) {
-            $kept = @($json.keybindings | Where-Object { $_.keys -ne 'ctrl+v' })
+        # Drop any prior ctrl+v entry (incl. a stale "unbound") from both arrays.
+        foreach ($prop in @('keybindings','actions')) {
+            if ($json.PSObject.Properties.Name -contains $prop -and $json.$prop) {
+                $json.$prop = @($json.$prop | Where-Object { $_.keys -ne 'ctrl+v' })
+            }
         }
-        $kept += [pscustomobject]@{ command = 'unbound'; keys = 'ctrl+v' }
+        # Legacy combined form is honored across WT versions.
+        $pasteBinding = [pscustomobject]@{ command = 'paste'; keys = 'ctrl+v' }
         if ($json.PSObject.Properties.Name -contains 'keybindings') {
-            $json.keybindings = $kept
+            $json.keybindings = @($json.keybindings) + $pasteBinding
         } else {
-            $json | Add-Member -NotePropertyName keybindings -NotePropertyValue $kept
+            $json | Add-Member -NotePropertyName keybindings -NotePropertyValue @($pasteBinding)
         }
         ($json | ConvertTo-Json -Depth 32) | Set-Content -Path $wt -Encoding UTF8
-        Write-Host "Unbound Ctrl+V in: $wt" -ForegroundColor Green
+        Write-Host "Bound Ctrl+V -> paste in: $wt" -ForegroundColor Green
     } catch {
-        Write-Host "Could not auto-edit $wt -- unbind Ctrl+V manually. ($($_.Exception.Message))" -ForegroundColor Yellow
+        Write-Host "Could not auto-edit $wt -- bind Ctrl+V to paste manually. ($($_.Exception.Message))" -ForegroundColor Yellow
     }
 }
 
