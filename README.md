@@ -1,6 +1,6 @@
-# dotfiles
+# cc-toolkit
 
-跨设备复用的个人环境配置 / 工具脚本。
+让 AI 命令行（Claude Code / Gemini CLI）更顺手的跨设备小工具集合。
 
 ## clip-paste — 在 Claude Code 里 Alt+V 截图后直接 Ctrl+V 粘贴图片
 
@@ -15,14 +15,14 @@ Windows Terminal 默认把 Ctrl+V 当「粘贴文本」拦截，所以截图（�
 
 ```powershell
 # 1. 拿到本仓库
-git clone https://github.com/zashliu/dotfiles.git
-cd dotfiles
+git clone https://github.com/zashliu/cc-toolkit.git
+cd cc-toolkit
 
 # 2. 一键安装（可重复运行）
 powershell -ExecutionPolicy Bypass -File .\setup-clip-paste.ps1
 ```
 
-或者更省事：在新电脑的 Claude Code 里直接说「clone 我的 dotfiles 并运行 setup-clip-paste.ps1」。
+或者更省事：在新电脑的 Claude Code 里直接说「clone 我的 cc-toolkit 仓库并运行 setup-clip-paste.ps1」。
 
 脚本会自动：
 
