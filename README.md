@@ -72,11 +72,13 @@ powershell -ExecutionPolicy Bypass -File .\setup-sharex-paste.ps1
 脚本会自动（幂等，可重复运行）：
 
 1. 找到 `ApplicationConfig.json`（Documents\ShareX 或 %LOCALAPPDATA%\ShareX）
-2. 备份为 `ApplicationConfig.json.bak`
+2. 备份 `ApplicationConfig.json` 和 `HotkeysConfig.json` 为 `.bak`
 3. 运行中的话先关闭 ShareX（避免它退出时覆盖改动）
-4. 把 `DefaultTaskSettings.AfterCaptureJob` 设为 `SaveImageToFile, CopyFilePathToClipboard`
-   （所有「使用默认捕获后任务」的截图快捷键都会继承）
-5. 重启 ShareX
+4. 把默认 `AfterCaptureJob` 设为 `SaveImageToFile, CopyFilePathToClipboard`
+5. **同时改写每个截图热键自带的 `AfterCaptureJob`**（设为复制路径、并关掉「使用默认捕获后任务」）。
+   有些截图热键带了自己的捕获后任务，会**覆盖**默认值——只改默认会出现「设了却不生效、
+   Ctrl+V 还是粘不进去」的坑，所以这一步直接把每个热键也改掉
+6. 重启 ShareX
 
 ### 使用
 

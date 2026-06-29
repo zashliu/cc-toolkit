@@ -24,6 +24,10 @@ Write-Host "== ShareX -> Claude Code paste setup ==" -ForegroundColor Cyan
 $applyValue  = 'SaveImageToFile, CopyFilePathToClipboard'
 $revertValue = 'CopyImageToClipboard, SaveImageToFile'
 $targetValue = if ($Revert) { $revertValue } else { $applyValue }
+# Per-hotkey: when applying, STOP deferring to the default (some capture
+# hotkeys carry their own AfterCaptureJob that would otherwise win); when
+# reverting, hand control back to the default.
+$hotkeyUseDefault = [bool]$Revert
 
 # --- 1. Locate ShareX config ------------------------------------------
 $candidates = @(
@@ -36,6 +40,7 @@ if (-not $config) {
     throw ("ShareX ApplicationConfig.json not found. Install ShareX and run it once first.`nChecked:`n" + ($candidates -join "`n"))
 }
 Write-Host "Config file : $config" -ForegroundColor Green
+$shareXDir = Split-Path $config
 
 # --- 2. Stop ShareX if running (remember its exe to restart) -----------
 $proc = Get-Process ShareX -ErrorAction SilentlyContinue
@@ -52,8 +57,7 @@ $backup = "$config.bak"
 Copy-Item $config $backup -Force
 Write-Host "Backup made  : $backup" -ForegroundColor Green
 
-# --- 4. Replace the first AfterCaptureJob value (DefaultTaskSettings;  -
-#        capture hotkeys with UseDefaultAfterCaptureJob=true inherit it) -
+# --- 4. Replace the default AfterCaptureJob (DefaultTaskSettings) ------
 $text = Get-Content $config -Raw
 $pattern = '("AfterCaptureJob":\s*")[^"]*(")'
 if ($text -notmatch $pattern) {
@@ -62,7 +66,30 @@ if ($text -notmatch $pattern) {
 $newText = ([regex]$pattern).Replace($text, "`${1}$targetValue`${2}", 1)
 # Write back as UTF-8 WITHOUT BOM (matches ShareX's own format)
 [System.IO.File]::WriteAllText($config, $newText, (New-Object System.Text.UTF8Encoding($false)))
-Write-Host "Set AfterCaptureJob = $targetValue" -ForegroundColor Green
+Write-Host "Set default AfterCaptureJob = $targetValue" -ForegroundColor Green
+
+# --- 4b. Patch per-hotkey TaskSettings (HotkeysConfig.json) -----------
+# Capture hotkeys can carry their OWN AfterCaptureJob that overrides the
+# default above, so changing only the default silently does nothing for
+# them -- the "set it, but Ctrl+V still pastes an image / does nothing" bug.
+# Force every hotkey to the same job and stop deferring to the default.
+$hotkeysCfg = Join-Path $shareXDir 'HotkeysConfig.json'
+if (Test-Path $hotkeysCfg) {
+    Copy-Item $hotkeysCfg "$hotkeysCfg.bak" -Force
+    $hk = Get-Content $hotkeysCfg -Raw | ConvertFrom-Json
+    $patched = 0
+    foreach ($e in @($hk.Hotkeys)) {
+        if ($null -ne $e.TaskSettings) {
+            $e.TaskSettings.UseDefaultAfterCaptureJob = $hotkeyUseDefault
+            $e.TaskSettings.AfterCaptureJob = $targetValue
+            $patched++
+        }
+    }
+    [System.IO.File]::WriteAllText($hotkeysCfg, ($hk | ConvertTo-Json -Depth 32), (New-Object System.Text.UTF8Encoding($false)))
+    Write-Host "Patched $patched hotkey(s)  : $hotkeysCfg" -ForegroundColor Green
+} else {
+    Write-Host "No HotkeysConfig.json (no custom capture hotkeys) - default is enough." -ForegroundColor DarkGray
+}
 
 # --- 5. Restart ShareX if it had been running -------------------------
 if ($shareXPath -and (Test-Path $shareXPath)) {
