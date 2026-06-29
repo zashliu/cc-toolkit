@@ -53,57 +53,6 @@ powershell -ExecutionPolicy Bypass -File .\setup-clip-paste.ps1
 
 ---
 
-## sharex-paste — 用 ShareX 时，更轻量的另一种 Ctrl+V 粘贴
-
-如果你用 [ShareX](https://getsharex.com/) 截图，可以不装 AutoHotkey、不常驻进程、不改
-Windows Terminal 设置，就让截图能在 Claude Code 里 **Ctrl+V / 右键**粘贴。
-
-做法：把 ShareX 的「捕获后任务」从「复制图片到剪贴板」改成「保存到文件 + 复制**文件路径**到
-剪贴板」。路径是纯文本，任何终端都能粘贴，Claude Code 会自动按该路径加载图片。
-
-### 启用
-
-前提：装了 ShareX 并至少运行过一次。
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\setup-sharex-paste.ps1
-```
-
-脚本会自动（幂等，可重复运行）：
-
-1. 找到 `ApplicationConfig.json`（Documents\ShareX 或 %LOCALAPPDATA%\ShareX）
-2. 备份为 `ApplicationConfig.json.bak`
-3. 运行中的话先关闭 ShareX（避免它退出时覆盖改动）
-4. 把 `DefaultTaskSettings.AfterCaptureJob` 设为 `SaveImageToFile, CopyFilePathToClipboard`
-   （所有「使用默认捕获后任务」的截图快捷键都会继承）
-5. 重启 ShareX
-
-### 使用
-
-1. 用 ShareX 截图（你原来的快捷键不变）
-2. 在 Claude Code 输入框 **Ctrl+V** 或**右键** → 粘进来的是路径 → 回车
-
-### clip-paste 还是 sharex-paste？
-
-| | **clip-paste**（AHK） | **sharex-paste**（本节） |
-|---|---|---|
-| 适用 | 任何能把图片放进剪贴板的截图工具 | 用 ShareX 截图 |
-| 终端 | 仅 Windows Terminal | 任何终端 |
-| 常驻进程 | 需要（AutoHotkey 开机自启） | 不需要 |
-| 改 WT 设置 | 是 | 否 |
-| 剪贴板里留的是 | 图片（其他 App 仍可粘贴图片） | 文件路径（其他 App 粘贴不到图片） |
-
-### 说明 / 排错
-
-- 改完后 ShareX **不再把图片本身**放进剪贴板，因此往微信等聊天软件直接粘贴截图会失效。
-  想恢复：`powershell -ExecutionPolicy Bypass -File .\setup-sharex-paste.ps1 -Revert`，
-  或在 ShareX 里同时勾选「复制图片到剪贴板」和「复制文件路径到剪贴板」。
-- 若某个截图快捷键单独取消了「使用默认捕获后任务」，在 ShareX 里把它重新勾上即可继承默认。
-
-> 同样是 OS / 工具层面配置，不随账号同步，跨设备靠本仓库 + 每台机器跑一次安装脚本。
-
----
-
 ## notify — Claude Code / Gemini CLI 完成一轮输出时响铃提醒
 
 让 AI 跑完当前回答时发出提示音，方便你及时回来检查结果。原理是给两个 CLI 各挂一个
