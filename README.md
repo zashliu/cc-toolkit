@@ -2,58 +2,7 @@
 
 让 AI 命令行（Claude Code / Gemini CLI）更顺手的跨设备小工具集合。
 
-## clip-paste — 在 Claude Code 里 Alt+V 截图后直接 Ctrl+V 粘贴图片
-
-Windows Terminal 默认把 Ctrl+V 当「粘贴文本」拦截，所以截图（纯图片）按 Ctrl+V
-传不到 Claude Code。这个脚本用 AutoHotkey 在 **Windows Terminal 激活时**拦截 Ctrl+V：
-剪贴板是图片就先存成 PNG、把文件路径放回剪贴板再粘贴，Claude Code 读取该路径加载图片；
-不是图片时 Ctrl+V 行为照旧。其他程序里的 Ctrl+V 完全不受影响。
-
-### 在一台新电脑上启用
-
-前提：Windows 10/11、用 **Windows Terminal** 运行 Claude Code。
-
-```powershell
-# 1. 拿到本仓库
-git clone https://github.com/zashliu/cc-toolkit.git
-cd cc-toolkit
-
-# 2. 一键安装（可重复运行）
-powershell -ExecutionPolicy Bypass -File .\setup-clip-paste.ps1
-```
-
-或者更省事：在新电脑的 Claude Code 里直接说「clone 我的 cc-toolkit 仓库并运行 setup-clip-paste.ps1」。
-
-脚本会自动：
-
-1. 用 winget 安装 AutoHotkey v2（已装则跳过）
-2. 在 `%USERPROFILE%\.cc-clippaste\` 生成 `clip-paste.ahk` 和 `save-clip-image.ps1`
-3. 在启动文件夹建快捷方式（开机自启）
-4. 在 Windows Terminal 的 `settings.json` 里把 Ctrl+V 绑定为 `paste`（拦截脚本末尾的 `Send("^v")` 要靠它才能粘贴）
-5. 立即启动拦截脚本
-
-### 使用
-
-1. **Alt+V**（或任意能把图片放进剪贴板的截图工具）截图
-2. 在 Claude Code 输入框 **Ctrl+V**
-
-### 说明 / 排错
-
-- 临时图片存在 `%TEMP%\cc-clip\`，可随时清空，不影响功能。
-- 没反应时先看托盘里有没有 AutoHotkey 绿色 H 图标；没有就手动运行
-  `%USERPROFILE%\.cc-clippaste\clip-paste.ahk`，或重跑安装脚本。
-- 第 4 步若提示无法自动改 `settings.json`，手动在 Windows Terminal 设置里确认
-  Ctrl+V 绑定为 `paste`（**不要解绑/unbound**，否则 `Send("^v")` 粘贴不了，
-  表现为「按 Ctrl+V 完全没反应」）。
-- 卸载：删掉启动文件夹里的 `cc-clip-paste.lnk` 和 `%USERPROFILE%\.cc-clippaste\` 即可
-  （WT 的 Ctrl+V 保持 `paste` 不用动）。
-
-> 注意：这套功能是**操作系统层面**的配置，不随 Claude Code 账号同步——
-> 跨设备靠的是本仓库 + 在每台机器上跑一次安装脚本。
-
----
-
-## sharex-paste — 用 ShareX 时，更轻量的另一种 Ctrl+V 粘贴
+## sharex-paste — 截图后在 Claude Code 里 Ctrl+V 直接粘贴图片（Windows）
 
 如果你用 [ShareX](https://getsharex.com/) 截图，可以不装 AutoHotkey、不常驻进程、不改
 Windows Terminal 设置，就让截图能在 Claude Code 里 **Ctrl+V / 右键**粘贴。
@@ -84,16 +33,6 @@ powershell -ExecutionPolicy Bypass -File .\setup-sharex-paste.ps1
 
 1. 用 ShareX 截图（你原来的快捷键不变）
 2. 在 Claude Code 输入框 **Ctrl+V** 或**右键** → 粘进来的是路径 → 回车
-
-### clip-paste 还是 sharex-paste？
-
-| | **clip-paste**（AHK） | **sharex-paste**（本节） |
-|---|---|---|
-| 适用 | 任何能把图片放进剪贴板的截图工具 | 用 ShareX 截图 |
-| 终端 | 仅 Windows Terminal | 任何终端 |
-| 常驻进程 | 需要（AutoHotkey 开机自启） | 不需要 |
-| 改 WT 设置 | 是 | 否 |
-| 剪贴板里留的是 | 图片（其他 App 仍可粘贴图片） | 文件路径（其他 App 粘贴不到图片） |
 
 ### 说明 / 排错
 
