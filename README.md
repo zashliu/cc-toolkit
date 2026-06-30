@@ -112,6 +112,15 @@ powershell -ExecutionPolicy Bypass -File .\claude-plugins\restore-plugins.ps1
 还原脚本读清单，逐个 `claude plugin marketplace add` + `claude plugin install`，**幂等**
 （已存在的跳过，可反复跑）。跑完**重启 Claude Code**（或 `/reload-plugins`）让插件生效。
 
+### 装的是最新版还是仓库里的旧版？——**最新版**
+
+清单**只存来源仓库引用 + 插件 id，不存插件内容、不锁版本**。还原时 `marketplace add`
+会从那个开源仓库**当场重新克隆**（=此刻的最新），`install` 再从这份新克隆安装，所以装到的
+是还原那一刻 upstream 的**最新版**。还原脚本里额外跑了一步 `marketplace update`
+兜底，确保即使该 marketplace 在本机已存在（`add` 不拉新）也强制刷到最新。
+
+> 想要相反的「钉住某个版本以求可复现」？本工具不做——它的目标就是跟随上游最新。
+
 ### 说明
 
 - 当前清单是 PowerShell 脚本（Windows）。`.ps1` 存成 **UTF-8 with BOM**，否则

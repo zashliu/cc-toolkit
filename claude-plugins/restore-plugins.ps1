@@ -21,7 +21,11 @@ Write-Host "== 还原 marketplaces ==" -ForegroundColor Cyan
 foreach ($m in $manifest.marketplaces) {
     Write-Host "  + $($m.name)  ($($m.source))"
     try {
+        # 新机器:从源仓库全新克隆 = 当下最新。
         claude plugin marketplace add $m.source 2>&1 | Out-Host
+        # 兜底:若该 marketplace 在本机已存在(add 不会拉新),强制刷到最新,
+        # 保证装到的是 upstream 开源项目的最新版,而不是旧克隆。
+        claude plugin marketplace update $m.name 2>&1 | Out-Host
     } catch {
         Write-Host "    (跳过/已存在:$($_.Exception.Message))" -ForegroundColor DarkYellow
     }
