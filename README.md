@@ -75,3 +75,48 @@ powershell -ExecutionPolicy Bypass -File .\setup-notify.ps1
 - 卸载：编辑两个 `settings.json` 删掉对应的 hook 条目，并删除 `%USERPROFILE%\.cc-notify\`。
 
 > 同样是 OS / CLI 层面配置，不随账号同步，跨设备靠本仓库 + 每台机器跑一次安装脚本。
+
+---
+
+## claude-plugins — 跨设备同步已装的 Claude Code 插件
+
+Claude Code 的插件（`/plugin marketplace add` + `/plugin install`）只存在本机
+`~/.claude/plugins/`，**不随账号同步**，换电脑就没了。这套脚本把「装了哪些 marketplace
+和插件」导出成一份与机器无关的清单 `claude-plugins/plugins.manifest.json`，提交进本仓库，
+换机后一条命令全部装回。
+
+> 为什么不直接备份 `~/.claude/plugins/*.json`：那两个文件写死了本机绝对路径
+> （`C:\Users\<你>\...`）、时间戳、commit SHA，换机/换用户名就失效。清单只抽取
+> 真正跨设备需要的「marketplace 来源仓库 + 插件 id/scope」。marketplace 和插件的实际
+> 内容都是 git 可重新拉取的，不必入库。
+
+### 备份（装了新插件后跑一次，然后 commit & push）
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\claude-plugins\backup-plugins.ps1
+git add claude-plugins/plugins.manifest.json
+git commit -m "chore: 更新插件清单"
+git push
+```
+
+### 在新电脑上还原
+
+前提：已 `npm i -g @anthropic-ai/claude-code` 并登录过。
+
+```powershell
+git clone https://github.com/zashliu/cc-toolkit.git
+cd cc-toolkit
+powershell -ExecutionPolicy Bypass -File .\claude-plugins\restore-plugins.ps1
+```
+
+还原脚本读清单，逐个 `claude plugin marketplace add` + `claude plugin install`，**幂等**
+（已存在的跳过，可反复跑）。跑完**重启 Claude Code**（或 `/reload-plugins`）让插件生效。
+
+### 说明
+
+- 当前清单是 PowerShell 脚本（Windows）。`.ps1` 存成 **UTF-8 with BOM**，否则
+  Windows PowerShell 5.1 会把中文注释读乱、解析失败。
+- 内置的官方 marketplace `claude-plugins-official` 也在清单里，还原时它通常已存在 → 脚本报
+  “already on disk” 跳过，无害。
+
+> 同样不随账号同步，跨设备靠本仓库 + 每台机器跑一次还原脚本。

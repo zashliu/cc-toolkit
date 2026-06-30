@@ -1,0 +1,20 @@
+﻿{
+    "_comment":  "由 backup-plugins.ps1 生成。换机后用 restore-plugins.ps1 还原。装了新插件就重跑备份脚本并提交。",
+    "generatedAt":  "2026-06-30T22:16:11.9253106+08:00",
+    "marketplaces":  [
+                         {
+                             "name":  "claude-plugins-official",
+                             "source":  "anthropics/claude-plugins-official"
+                         },
+                         {
+                             "name":  "karpathy-skills",
+                             "source":  "forrestchang/andrej-karpathy-skills"
+                         }
+                     ],
+    "plugins":  [
+                    {
+                        "id":  "andrej-karpathy-skills@karpathy-skills",
+                        "scope":  "user"
+                    }
+                ]
+}
