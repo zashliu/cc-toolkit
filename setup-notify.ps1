@@ -6,6 +6,9 @@
 #   Claude Code -> "Stop" hook        (fires when the response ends)
 #   Gemini CLI  -> "AfterAgent" hook  (fires once per turn after final reply)
 #
+# The alarm plays without touching other apps' volume or mute state, so an
+# interrupted alarm can never leave the system silent.
+#
 # Idempotent & machine-agnostic. Safe to re-run.
 #   powershell -ExecutionPolicy Bypass -File .\setup-notify.ps1
 # =====================================================================
@@ -19,21 +22,78 @@ New-Item -ItemType Directory -Force -Path $dir | Out-Null
 $soundPs = Join-Path $dir 'notify-sound.ps1'
 
 @'
-# Plays a short notification sound, then prints "{}" to stdout.
-# Gemini CLI hooks require stdout to contain ONLY JSON; "{}" is a no-op
-# for both Gemini (AfterAgent) and Claude Code (Stop).
+# Displays a topmost WinForms MessageBox and plays a looping alarm sound until dismissed.
+# Does NOT touch other apps' volume or mute state, so an interrupted alarm can never
+# leave the system muted.
+# Gemini CLI hooks require stdout to contain ONLY JSON; "{}" is a no-op.
 $ErrorActionPreference = 'SilentlyContinue'
 try {
-    $wav = Join-Path $env:WINDIR 'Media\Windows Notify System Generic.wav'
-    if (-not (Test-Path $wav)) { $wav = Join-Path $env:WINDIR 'Media\notify.wav' }
-    if (Test-Path $wav) {
-        (New-Object System.Media.SoundPlayer $wav).PlaySync()
-    } else {
-        [console]::beep(880, 150); [console]::beep(1175, 250)
+    Add-Type -AssemblyName System.Windows.Forms
+
+    # Make sure the alarm will actually be heard: unmute the default output
+    # device and lift the volume off the floor. This NEVER mutes anything and
+    # never touches other apps, so it can't leave the system silent.
+    if (-not ([System.Management.Automation.PSTypeName]'CcNotify.Vol').Type) {
+        Add-Type -ErrorAction SilentlyContinue -TypeDefinition @"
+        using System;
+        using System.Runtime.InteropServices;
+        namespace CcNotify {
+            [ComImport, Guid("BCDE0395-E52F-467C-8E3D-C4579291692E")] internal class MMDeviceEnumerator {}
+            [Guid("A95664D2-9614-4F35-A746-DE8DB63617E6"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)] internal interface IMMDeviceEnumerator { int NotImpl1(); [PreserveSig] int GetDefaultAudioEndpoint(int dataFlow, int role, out IMMDevice ppEndpoint); }
+            [Guid("D666063F-1587-4E43-81F1-B948E807363F"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)] internal interface IMMDevice { [PreserveSig] int Activate(ref Guid iid, int dwClsCtx, IntPtr pActivationParams, [MarshalAs(UnmanagedType.IUnknown)] out object ppInterface); }
+            [Guid("5CDF2C82-841E-4546-9722-0CF74078229A"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)] internal interface IAudioEndpointVolume { [PreserveSig] int RegisterControlChangeNotify(IntPtr n); [PreserveSig] int UnregisterControlChangeNotify(IntPtr n); [PreserveSig] int GetChannelCount(out int c); [PreserveSig] int SetMasterVolumeLevel(float d, ref Guid ctx); [PreserveSig] int SetMasterVolumeLevelScalar(float fLevel, ref Guid ctx); [PreserveSig] int GetMasterVolumeLevel(out float d); [PreserveSig] int GetMasterVolumeLevelScalar(out float pfLevel); [PreserveSig] int SetChannelVolumeLevel(uint ch, float d, ref Guid ctx); [PreserveSig] int SetChannelVolumeLevelScalar(uint ch, float l, ref Guid ctx); [PreserveSig] int GetChannelVolumeLevel(uint ch, out float d); [PreserveSig] int GetChannelVolumeLevelScalar(uint ch, out float l); [PreserveSig] int SetMute(bool bMute, ref Guid ctx); [PreserveSig] int GetMute(out bool pbMute); }
+            public class Vol {
+                public static void EnsureAudible() {
+                    try {
+                        // Unmute the default device for all roles (console/multimedia/comms)
+                        foreach (int role in new int[] { 0, 1, 2 }) {
+                            try {
+                                IMMDeviceEnumerator de = (IMMDeviceEnumerator)new MMDeviceEnumerator();
+                                IMMDevice dev; if (de.GetDefaultAudioEndpoint(0, role, out dev) != 0 || dev == null) continue;
+                                Guid iid = typeof(IAudioEndpointVolume).GUID; object o;
+                                dev.Activate(ref iid, 23, IntPtr.Zero, out o);
+                                IAudioEndpointVolume ep = (IAudioEndpointVolume)o;
+                                Guid ctx = Guid.Empty;
+                                ep.SetMute(false, ref ctx);
+                                float v; ep.GetMasterVolumeLevelScalar(out v);
+                                if (v < 0.2f) ep.SetMasterVolumeLevelScalar(0.5f, ref ctx);
+                            } catch {}
+                        }
+                    } catch {}
+                }
+            }
+        }
+"@
     }
-} catch {
-    try { [console]::beep(880, 200) } catch { }
-}
+    [CcNotify.Vol]::EnsureAudible()
+
+    # Try to find a loud alarm/ring sound
+    $wav = Join-Path $env:WINDIR 'Media\Alarm02.wav'
+    if (-not (Test-Path $wav)) { $wav = Join-Path $env:WINDIR 'Media\Ring01.wav' }
+    if (-not (Test-Path $wav)) { $wav = Join-Path $env:WINDIR 'Media\Windows Notify System Generic.wav' }
+
+    if (Test-Path $wav) {
+        $player = New-Object System.Media.SoundPlayer $wav
+        $player.PlayLooping()
+    } else {
+        $beepJob = Start-Job -ScriptBlock { while($true) { [console]::beep(880, 200); Start-Sleep -Milliseconds 200 } }
+    }
+
+    $options = [System.Windows.Forms.MessageBoxOptions]::DefaultDesktopOnly -bor [System.Windows.Forms.MessageBoxOptions]::ServiceNotification
+    [System.Windows.Forms.MessageBox]::Show(
+        "Calculation completed! Check the terminal.",
+        "AI CLI Assistant",
+        [System.Windows.Forms.MessageBoxButtons]::OK,
+        [System.Windows.Forms.MessageBoxIcon]::Exclamation,
+        [System.Windows.Forms.MessageBoxDefaultButton]::Button1,
+        $options
+    ) | Out-Null
+
+    if ($player) { $player.Stop() }
+    if ($beepJob) { Stop-Job $beepJob; Remove-Job $beepJob }
+} catch { }
+
+# Output ONLY JSON to stdout to satisfy Claude/Gemini CLI hooks requirement
 Write-Output '{}'
 '@ | Out-File -FilePath $soundPs -Encoding ascii
 Write-Host "Wrote $soundPs" -ForegroundColor Green
@@ -67,26 +127,32 @@ function Add-CompletionHook {
     # existing definitions for this event
     $defs = @()
     if (($hooks.PSObject.Properties.Name -contains $Event) -and $hooks.$Event) {
-        $defs = @($hooks.$Event)
-    }
-
-    # already configured? (same command anywhere in this event)
-    $already = $false
-    foreach ($d in $defs) {
-        foreach ($h in @($d.hooks)) {
-            if ($h.command -eq $Command) { $already = $true }
+        # Filter out existing notify-sound hooks so we can replace them cleanly
+        foreach ($d in @($hooks.$Event)) {
+            $hasNotifySound = $false
+            foreach ($h in @($d.hooks)) {
+                if ($h.command -like "*notify-sound.ps1*") {
+                    $hasNotifySound = $true
+                }
+            }
+            if (-not $hasNotifySound) {
+                $defs += $d
+            }
         }
-    }
-
-    if ($already) {
-        Write-Host "Already configured: $Event in $SettingsPath" -ForegroundColor DarkGray
-        return
     }
 
     # build our hook entry
     $entry = [ordered]@{ type = 'command'; command = $Command }
     if ($HookName) { $entry['name'] = $HookName }
-    $newDef = [pscustomobject]@{ hooks = @([pscustomobject]$entry) }
+    
+    # build outer object with matcher if required (e.g. Gemini's AfterAgent)
+    $newDefProps = [ordered]@{ hooks = @([pscustomobject]$entry) }
+    if ($Event -eq 'AfterAgent') {
+        $newDefProps['matcher'] = '*'
+    } elseif ($Event -eq 'Notification') {
+        $newDefProps['matcher'] = 'permission_prompt|idle_prompt'
+    }
+    $newDef = [pscustomobject]$newDefProps
 
     $defs = @($defs) + $newDef
     if ($hooks.PSObject.Properties.Name -contains $Event) {
@@ -101,10 +167,11 @@ function Add-CompletionHook {
     Write-Host "Added $Event hook -> $SettingsPath" -ForegroundColor Green
 }
 
-# --- Claude Code (~/.claude/settings.json, "Stop") --------------------
+# --- Claude Code (~/.claude/settings.json, "Stop" & "Notification") --------------------
 $claudeDir = Join-Path $env:USERPROFILE '.claude'
 if (Test-Path $claudeDir) {
     Add-CompletionHook -SettingsPath (Join-Path $claudeDir 'settings.json') -Event 'Stop' -Command $cmd -HookName ''
+    Add-CompletionHook -SettingsPath (Join-Path $claudeDir 'settings.json') -Event 'Notification' -Command $cmd -HookName ''
 } else {
     Write-Host "Claude Code (~/.claude) not found - skipped." -ForegroundColor Yellow
 }
