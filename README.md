@@ -129,3 +129,27 @@ powershell -ExecutionPolicy Bypass -File .\claude-plugins\restore-plugins.ps1
   “already on disk” 跳过，无害。
 
 > 同样不随账号同步，跨设备靠本仓库 + 每台机器跑一次还原脚本。
+
+---
+
+## bedtime-guard — 防熬夜强制关机（按北京时间，防改时间/断网绕过）
+
+到就寝时段（默认**北京时间 23:45–06:00**）自动强制关机。和普通定时关机不同，它防住了「手动改本地时间」和「临时断网」两种绕过：联网用 NTP 取真实时间，断网用开机单调计时器 + 上次联网锚点推算，改系统时钟一律无效。关机前 180 秒倒计时，并弹窗可**延迟 15 分钟（每晚一次）**保存工作。
+
+### 启用
+
+需**管理员** PowerShell（注册 SYSTEM 计划任务）：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\bedtime-guard\Install.ps1
+```
+
+会部署脚本到 `C:\ProgramData\BedtimeGuard\` 并注册 3 个每分钟任务：执行器（SYSTEM，关机）、看门狗（SYSTEM，与执行器互相监护防删）、弹窗器（用户会话，仅夜间运行、隐藏不闪窗）。
+
+### 使用与配置
+
+到点后桌面弹窗 + 倒计时，点「延迟 15 分钟」可顺延一次。窗口时段、倒计时、延迟时长等在 `bedtime-guard/BedtimeGuard.ps1` 顶部可配。卸载：`powershell -ExecutionPolicy Bypass -File .\bedtime-guard\Uninstall.ps1`（管理员）。
+
+详见 [`bedtime-guard/README.md`](bedtime-guard/README.md)。
+
+> ⚠️ `.ps1` 含中文，须存为 **UTF-8 with BOM**（否则 PowerShell 5.1 按 GBK 读取报错）。目标是按 Fogg 行为模型加大熬夜/绕过的阻力，非绝对不可逆。
