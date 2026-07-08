@@ -44,7 +44,11 @@ foreach ($name in 'BedtimeGuard','BedtimeGuardWatchdog','BedtimeGuardNotify') {
     $t.Settings.DisallowStartIfOnBatteries = $false
     $t.Settings.StopIfGoingOnBatteries     = $false
     $t.Settings.StartWhenAvailable         = $true
-    $t.Settings.ExecutionTimeLimit         = 'PT3M'
+    if ($name -eq 'BedtimeGuardNotify') {
+        $t.Settings.ExecutionTimeLimit     = 'PT15M'
+    } else {
+        $t.Settings.ExecutionTimeLimit     = 'PT3M'
+    }
     Set-ScheduledTask -TaskName $name -Settings $t.Settings | Out-Null
 }
 

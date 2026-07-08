@@ -27,11 +27,14 @@ if (Test-Path $MarkerFile) { if ((Get-Content $MarkerFile -Raw).Trim() -eq $key)
 if ($rt.delayAvailable) {
     $form = New-Object System.Windows.Forms.Form
     $form.Text = 'BedtimeGuard · 就寝提醒'
-    $form.Size = New-Object System.Drawing.Size(440, 210)
+    $form.Size = New-Object System.Drawing.Size(560, 300)
+    $form.MinimumSize = New-Object System.Drawing.Size(560, 300)
     $form.StartPosition = 'CenterScreen'
     $form.FormBorderStyle = 'FixedDialog'
     $form.MaximizeBox = $false; $form.MinimizeBox = $false
     $form.TopMost = $true
+    $form.ShowInTaskbar = $true
+    $form.AutoScaleMode = [System.Windows.Forms.AutoScaleMode]::Dpi
 
     $lbl = New-Object System.Windows.Forms.Label
     if ($rt.inWarning) {
@@ -40,24 +43,26 @@ if ($rt.delayAvailable) {
         $when = "现在"
     }
     $lbl.Text = ("睡觉时间{0}到（北京时间 {1}）。`n系统将强制关机，请立即保存工作。`n`n可延迟 15 分钟——今晚仅此一次。" -f $when, $rt.beijingHHmm)
-    $lbl.SetBounds(24, 20, 390, 90)
-    $lbl.Font = New-Object System.Drawing.Font('Microsoft YaHei', 10)
+    $lbl.SetBounds(28, 24, 500, 130)
+    $lbl.Font = New-Object System.Drawing.Font('Microsoft YaHei', 12)
     $form.Controls.Add($lbl)
 
     $btnDelay = New-Object System.Windows.Forms.Button
     $btnDelay.Text = '延迟 15 分钟（今晚仅一次）'
-    $btnDelay.SetBounds(24, 125, 220, 40)
-    $btnDelay.Font = New-Object System.Drawing.Font('Microsoft YaHei', 9)
+    $btnDelay.SetBounds(28, 190, 280, 46)
+    $btnDelay.Font = New-Object System.Drawing.Font('Microsoft YaHei', 11)
     $btnDelay.DialogResult = [System.Windows.Forms.DialogResult]::Yes
     $form.Controls.Add($btnDelay)
 
     $btnOk = New-Object System.Windows.Forms.Button
     $btnOk.Text = '知道了，现在保存'
-    $btnOk.SetBounds(258, 125, 150, 40)
-    $btnOk.Font = New-Object System.Drawing.Font('Microsoft YaHei', 9)
+    $btnOk.SetBounds(330, 190, 190, 46)
+    $btnOk.Font = New-Object System.Drawing.Font('Microsoft YaHei', 11)
     $btnOk.DialogResult = [System.Windows.Forms.DialogResult]::No
     $form.Controls.Add($btnOk)
-    $form.AcceptButton = $btnOk
+    $form.AcceptButton = $btnDelay
+    $form.CancelButton = $btnOk
+    $form.Add_Shown({ $this.Activate(); $this.BringToFront() })
 
     $r = $form.ShowDialog()
     $form.Dispose()
