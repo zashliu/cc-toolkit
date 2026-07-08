@@ -8,7 +8,8 @@
 # ------------------------- 可配置项 -------------------------
 $WindowStart       = '23:45'  # 关机窗口起点（北京时间，含）
 $WindowEnd         = '06:00'  # 关机窗口终点（北京时间，不含）
-$CountdownSeconds  = 180      # 关机前倒计时秒数（此期间可在弹窗点"延迟15分钟"）
+$CountdownSeconds  = 180      # 关机前倒计时秒数
+$WarningLeadSeconds = 180     # 提前多少秒弹出"延迟15分钟"窗口
 $DelayMinutes      = 15       # 延迟时长（分钟）
 $OfflineRebootMode = 'require-network'   # 'trust-local' 或 'require-network'
 #   trust-local     : 重启后又断网、无法校准时，信任本地时钟（会留一个理论漏洞）
@@ -151,13 +152,23 @@ $endM    = ConvertTo-Minutes $WindowEnd
 if ($startM -le $endM) { $inWindow = ($mins -ge $startM -and $mins -lt $endM) }
 else                   { $inWindow = ($mins -ge $startM -or  $mins -lt $endM) }
 
-# 计算"今晚"标识（跨零点时把凌晨归到前一天，保证延迟额度按整晚计）
-if ($inWindow) {
-    if ($mins -ge $startM) { $nightId = $beijing.ToString('yyyy-MM-dd') }
-    else                   { $nightId = $beijing.AddDays(-1).ToString('yyyy-MM-dd') }
+# 计算今晚的关机起点、预警窗口和"今晚"标识。
+# 例：23:45 开始关机，23:42-23:45 弹窗；凌晨归到前一晚，保证延迟额度按整晚计。
+$windowStartToday = $beijing.Date.AddMinutes($startM)
+if ($startM -le $endM) {
+    $windowStartForNight = $windowStartToday
+} else {
+    if ($mins -lt $endM) { $windowStartForNight = $windowStartToday.AddDays(-1) }
+    else                 { $windowStartForNight = $windowStartToday }
+}
+$secondsUntilWindowStart = [int][Math]::Ceiling(($windowStartForNight - $beijing).TotalSeconds)
+$inWarning = (-not $inWindow -and $secondsUntilWindowStart -gt 0 -and $secondsUntilWindowStart -le $WarningLeadSeconds)
+
+if ($inWindow -or $inWarning) {
+    $nightId = $windowStartForNight.ToString('yyyy-MM-dd')
 } else { $nightId = '' }
 
-if ($TestForceWindow) { $inWindow = $true; if (-not $nightId) { $nightId = $beijing.ToString('yyyy-MM-dd') } }
+if ($TestForceWindow) { $inWindow = $true; $inWarning = $false; if (-not $nightId) { $nightId = $beijing.ToString('yyyy-MM-dd') } }
 
 # 读取运行时状态（延迟额度）
 $delayUntilTick = 0; $delayUsedNight = ''
@@ -167,7 +178,7 @@ if (Test-Path $RuntimeFile) {
 
 $delaying = $false
 
-if ($inWindow) {
+if ($inWindow -or $inWarning) {
     if ($delayUntilTick -gt 0 -and $tickNow -lt $delayUntilTick) {
         # 延迟进行中：不关机；清掉延迟期间产生的多余请求，避免到期时误判
         $delaying = $true
@@ -178,7 +189,8 @@ if ($inWindow) {
         # 收到延迟请求
         Remove-Item $RequestFile -Force -ErrorAction SilentlyContinue
         if ($delayUsedNight -ne $nightId) {
-            $delayUntilTick = $tickNow + $DelayMinutes * 60000
+            $extraUntilWindowMs = if ($inWarning) { [Math]::Max(0, $secondsUntilWindowStart * 1000) } else { 0 }
+            $delayUntilTick = $tickNow + $extraUntilWindowMs + ($DelayMinutes * 60000)
             $delayUsedNight = $nightId
             $delaying = $true
             Invoke-AbortShutdown
@@ -187,6 +199,9 @@ if ($inWindow) {
             Write-Log ("DELAY DENIED 今晚已用过 night={0} -> 关机" -f $nightId)
             Invoke-Shutdown $CountdownSeconds ("睡觉时间到（北京时间 {0}），{1}秒后关机。今晚延迟机会已用完。" -f $beijing.ToString('HH:mm'), $CountdownSeconds)
         }
+    }
+    elseif ($inWarning) {
+        Write-Log ("WARNING night={0} beijing={1} shutdownIn={2}s source={3}" -f $nightId, $beijing.ToString('HH:mm:ss'), $secondsUntilWindowStart, $source)
     }
     else {
         # 到点且无延迟：武装/维持关机倒计时（重复调用不会重置已在进行的倒计时）
@@ -204,6 +219,8 @@ try {
         updatedUtc     = $trustedUtc.ToString('o')
         tickNow        = $tickNow
         inWindow       = $inWindow
+        inWarning      = $inWarning
+        secondsUntilWindowStart = $secondsUntilWindowStart
         delaying       = $delaying
         delayAvailable = $delayAvailable
         nightId        = $nightId

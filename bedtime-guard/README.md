@@ -1,7 +1,7 @@
 # bedtime-guard — 防熬夜强制关机（按北京时间，防改时间/断网绕过）
 
 到了就寝时段（默认**北京时间 23:45–06:00**）自动强制关机，帮你戒掉持续熬夜。
-关机前有 180 秒倒计时警告，并弹出可**延迟 15 分钟（每晚一次）**的窗口，方便保存手头工作。
+关机前 3 分钟会先弹出可**延迟 15 分钟（每晚一次）**的窗口，方便保存手头工作；未延迟则到点进入 180 秒关机倒计时。
 
 和普通的定时关机脚本不同，它专门防住了自己会用的两种绕过手段：
 
@@ -28,7 +28,7 @@ powershell -ExecutionPolicy Bypass -File .\bedtime-guard\Install.ps1
 
 ## 使用
 
-到点后：桌面弹出提醒 + 180 秒倒计时。点「延迟 15 分钟」可顺延一次；不管它就自动关机。
+默认 23:42 左右：桌面弹出提醒。点「延迟 15 分钟」会把 23:45 的关机点顺延到约 00:00；不管它则 23:45 进入 180 秒倒计时并自动关机。
 即使 `shutdown /a` 取消，下一分钟会再次触发。
 
 ## 配置
@@ -39,6 +39,7 @@ powershell -ExecutionPolicy Bypass -File .\bedtime-guard\Install.ps1
 |------|------|------|
 | `$WindowStart` / `$WindowEnd` | `23:45` / `06:00` | 关机窗口（北京时间，跨零点自动处理） |
 | `$CountdownSeconds` | `180` | 关机前倒计时秒数 |
+| `$WarningLeadSeconds` | `180` | 提前弹出延迟窗口的秒数 |
 | `$DelayMinutes` | `15` | 延迟时长 |
 | `$OfflineRebootMode` | `require-network` | `require-network`（重启断网即关机，最严格）/ `trust-local`（信任本地钟，留漏洞） |
 | `$BootGraceMinutes` | `5` | 开机宽限期，给网络就绪时间，避免开机误关 |

@@ -13,8 +13,10 @@ $MarkerFile  = Join-Path $Dir ("notify-shown-{0}.txt" -f $env:USERNAME)
 if (-not (Test-Path $RuntimeFile)) { return }
 try { $rt = Get-Content $RuntimeFile -Raw | ConvertFrom-Json } catch { return }
 
-# 不在关机窗口 → 清掉已显示标记，供下一晚重新弹出
-if (-not $rt.inWindow) { Remove-Item $MarkerFile -Force -ErrorAction SilentlyContinue; return }
+$notifyActive = ($rt.inWindow -or $rt.inWarning)
+
+# 不在预警/关机窗口 → 清掉已显示标记，供下一晚重新弹出
+if (-not $notifyActive) { Remove-Item $MarkerFile -Force -ErrorAction SilentlyContinue; return }
 # 延迟进行中 → 不打扰
 if ($rt.delaying) { return }
 
@@ -32,7 +34,12 @@ if ($rt.delayAvailable) {
     $form.TopMost = $true
 
     $lbl = New-Object System.Windows.Forms.Label
-    $lbl.Text = ("睡觉时间到（北京时间 {0}）。`n系统即将强制关机，请立即保存工作。`n`n可延迟 15 分钟——今晚仅此一次。" -f $rt.beijingHHmm)
+    if ($rt.inWarning) {
+        $when = "约 3 分钟后"
+    } else {
+        $when = "现在"
+    }
+    $lbl.Text = ("睡觉时间{0}到（北京时间 {1}）。`n系统将强制关机，请立即保存工作。`n`n可延迟 15 分钟——今晚仅此一次。" -f $when, $rt.beijingHHmm)
     $lbl.SetBounds(24, 20, 390, 90)
     $lbl.Font = New-Object System.Drawing.Font('Microsoft YaHei', 10)
     $form.Controls.Add($lbl)

@@ -38,8 +38,8 @@ schtasks /create /tn 'BedtimeGuardWatchdog' /tr $wdTr     /sc minute /mo 1 /ru S
 # 弹窗器只在夜间时段每分钟运行（23:00 起、持续 7.5 小时到次日 06:30），白天完全不启动
 schtasks /create /tn 'BedtimeGuardNotify'   /tr $notifyTr /sc daily /st 23:00 /ri 1 /du 0007:30 /ru $interactiveUser /rl LIMITED /it /f | Out-Null
 
-# 两个 SYSTEM 任务：允许电池供电时运行、错过后尽快补跑
-foreach ($name in 'BedtimeGuard','BedtimeGuardWatchdog') {
+# 三个任务：允许电池供电时运行、错过后尽快补跑
+foreach ($name in 'BedtimeGuard','BedtimeGuardWatchdog','BedtimeGuardNotify') {
     $t = Get-ScheduledTask -TaskName $name
     $t.Settings.DisallowStartIfOnBatteries = $false
     $t.Settings.StopIfGoingOnBatteries     = $false
