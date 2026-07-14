@@ -1,0 +1,15 @@
+{
+  "DayConfiguration": {
+    "Temperature": 5600,
+    "Brightness": 0.95
+  },
+  "NightConfiguration": {
+    "Temperature": 4000,
+    "Brightness": 0.9
+  },
+  "IsAutoUpdateEnabled": false,
+  "IsManualSunriseSunsetEnabled": false,
+  "IsDefaultToDayConfigurationEnabled": false,
+  "IsConfigurationSmoothingEnabled": true,
+  "ConfigurationTransitionDuration": "00:40:00"
+}
