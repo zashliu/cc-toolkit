@@ -1,22 +1,28 @@
 # AI usage reset reminders
 
-The reminder uses Windows Task Scheduler and registers only the next reset for each limit. When it fires, it plays the Windows notification sound, shows a notification, and schedules the following reset.
+The Claude watcher reads the same live OAuth usage endpoint used by Claude Code:
 
-Edit `usage-reminders.json` before installation:
+`https://api.anthropic.com/api/oauth/usage`
 
-- `period: "5h"` means a rolling five-hour reset.
-- `period: "weekly"` means a seven-day reset.
-- `anchor` must be the provider's known reset time in ISO 8601 format, including the time-zone offset, for example `2026-08-05T01:59:00+08:00`.
-- Set `enabled` to `true` for a reminder. Claude entries are enabled from the supplied usage screenshot; Codex entries remain disabled until its own reset times are entered.
+It reads `five_hour` and `seven_day` usage, reset timestamps, and utilization. The watcher polls every five minutes and stores only the latest non-secret snapshot in `%LOCALAPPDATA%\cc-toolkit\usage-reminder-state.json`.
 
-Install or refresh the tasks:
+An alert is emitted only when both conditions are true:
+
+1. The API reports a new future reset window after the previous window ended.
+2. Utilization falls by at least 10 percentage points (or to 5% or less).
+
+Therefore a clock reaching the old `resets_at` does not by itself trigger an alert. If Claude only applies the reset after the next user prompt, the next poll after that prompt detects the actual API transition.
+
+Install or refresh the watcher:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\setup-usage-reminders.ps1
 ```
 
-Inspect the next scheduled alerts:
+Inspect live data without changing tasks:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\usage-reminder.ps1 -Action ShowNext
 ```
+
+The endpoint is an internal Claude Code OAuth endpoint rather than a stable public API. If Anthropic changes it, the watcher fails closed and warns instead of generating a false reset alert. Codex remains disabled until a comparable live data source is available.

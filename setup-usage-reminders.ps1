@@ -11,4 +11,4 @@ if (-not (Test-Path -LiteralPath $script)) { throw "Missing $script" }
 if (-not (Test-Path -LiteralPath $ConfigPath)) { throw "Missing $ConfigPath" }
 
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File $script -Action Install -ConfigPath $ConfigPath
-Write-Output 'Usage reset reminders installed. Run usage-reminder.ps1 -Action ShowNext to inspect the next alerts.'
+Write-Output 'Claude usage watcher installed. It reads the live usage endpoint every few minutes and only alerts after an observed reset.'
