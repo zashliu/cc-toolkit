@@ -157,7 +157,7 @@ powershell -ExecutionPolicy Bypass -File .\bedtime-guard\Install.ps1
 
 ## usage-reminder - live AI quota reset reminders
 
-The Claude watcher reads the live Claude Code OAuth usage endpoint every five minutes. It uses the returned `five_hour` and `seven_day` reset timestamps and utilization, and alerts only after an actual reset transition is observed. It does not infer a reset from a clock alone.
+The Claude watcher reads the live Claude Code OAuth usage endpoint from a `Stop` hook. The first Claude use after boot triggers one check; later checks are allowed only after five hours. It uses the returned `five_hour` and `seven_day` reset timestamps and utilization, and alerts only after an actual reset transition is observed. It does not infer a reset from a clock alone.
 
 Install or refresh it with:
 

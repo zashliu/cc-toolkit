@@ -1,7 +1,7 @@
 {
   "claude": {
     "enabled": true,
-    "poll_minutes": 5
+    "check_after_hours": 5
   },
   "codex": {
     "enabled": false,
