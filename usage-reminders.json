@@ -1,0 +1,26 @@
+{
+  "reminders": [
+    {
+      "provider": "Claude Code",
+      "period": "5h",
+      "anchor": "2026-07-29T20:39:00+08:00"
+    },
+    {
+      "provider": "Claude Code",
+      "period": "weekly",
+      "anchor": "2026-08-05T01:59:00+08:00"
+    },
+    {
+      "provider": "Codex",
+      "period": "5h",
+      "enabled": false,
+      "anchor": "2026-01-01T00:00:00+08:00"
+    },
+    {
+      "provider": "Codex",
+      "period": "weekly",
+      "enabled": false,
+      "anchor": "2026-01-01T00:00:00+08:00"
+    }
+  ]
+}

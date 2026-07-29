@@ -153,3 +153,22 @@ powershell -ExecutionPolicy Bypass -File .\bedtime-guard\Install.ps1
 详见 [`bedtime-guard/README.md`](bedtime-guard/README.md)。
 
 > ⚠️ `.ps1` 含中文，须存为 **UTF-8 with BOM**（否则 PowerShell 5.1 按 GBK 读取报错）。目标是按 Fogg 行为模型加大熬夜/绕过的阻力，非绝对不可逆。
+---
+
+## usage-reminder - AI quota reset reminders
+
+Schedules reminders for Claude Code and Codex rolling five-hour and weekly quota resets. It registers only the next task; after the alert fires, the next cycle is scheduled automatically. It does not change system volume or mute other applications.
+
+Edit `usage-reminders.json` with each service's actual reset anchors, then run:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\setup-usage-reminders.ps1
+```
+
+Inspect the next alerts:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\usage-reminder.ps1 -Action ShowNext
+```
+
+The Claude entries are prefilled from the supplied usage screenshot. Codex entries are disabled until its own five-hour and weekly reset times are entered; then set their `enabled` values to `true`.
