@@ -1,29 +1,63 @@
 ﻿# ============================================================
 #  BedtimeGuard —— 按北京时间强制关机，防熬夜（执行器 / SYSTEM）
-#  - 联网时用 NTP 校准真实时间（改本地时钟无效）
-#  - 断网时用开机单调计时器推算（改本地时钟无效，重启才失效）
-#  - 关机前有倒计时警告；配套弹窗器 Notify.ps1 提供"延迟15分钟"按钮
+#
+#  时间来源策略（v2，严格模式）：
+#   - 只认【联网取到的真实时间】：NTP（UDP 123）+ HTTPS 响应头 Date 双通道
+#   - 本地系统时钟【完全不参与】任何判断，随便改，无效
+#   - 不再用「单调计时器 + 上次锚点」推算钟点，因为断网重启会让它冻结
+#   - 取不到真实时间（断网 / UDP 被封 / DNS 被改）→ 过宽限期直接关机
+#   - 拿到的时间若比上次可信时间明显回拨 → 视为伪造，拒绝采信
+#
+#  关机前有倒计时警告；配套弹窗器 Notify.ps1 提供“延迟15分钟”按钮
 # ============================================================
 
 # ------------------------- 可配置项 -------------------------
 $WindowStart       = '23:45'  # 关机窗口起点（北京时间，含）
 $WindowEnd         = '06:00'  # 关机窗口终点（北京时间，不含）
 $CountdownSeconds  = 180      # 关机前倒计时秒数
-$WarningLeadSeconds = 180     # 提前多少秒弹出"延迟15分钟"窗口
+$WarningLeadSeconds = 180     # 提前多少秒弹出“延迟15分钟”窗口
 $DelayMinutes      = 15       # 延迟时长（分钟）
-$OfflineRebootMode = 'require-network'   # 'trust-local' 或 'require-network'
-#   trust-local     : 重启后又断网、无法校准时，信任本地时钟（会留一个理论漏洞）
-#   require-network : 重启后无法校准真实时间时，直接关机，逼你联网才能用（最严格）
-$BootGraceMinutes  = 5        # 开机后给网络就绪的宽限期；此期间联不上网不关机
-$NtpServers = @('ntp.aliyun.com','ntp.tencent.com','time.windows.com','pool.ntp.org')
+
+# —— 断网策略：取不到真实时间就关机 ——
+$BootGraceMinutes    = 5      # 开机后给网络就绪的宽限期，此期间联不上网不关机
+$OfflineGraceMinutes = 5      # 持续联不上网多久后关机（容忍瞬时抖动，防误杀）
+$MaxBackwardSkewMinutes = 10  # 允许比“上次可信时间”早多少分钟；超过视为伪造时间源
+
+# —— 时间源 ——
+# 两条通道：HTTPS 响应头 Date（443/TCP）和 NTP（123/UDP）。
+# 实测在 Clash/Mihomo 这类 TUN+fake-IP 代理下，两条都会【间歇性整条挂掉】，
+# 但很少同时挂。所以不写死优先级，靠 state 里的 lastGoodProbe 自适应（见下方函数）。
+$HttpTimeUrls = @(
+    'https://www.baidu.com/','https://www.qq.com/','https://www.taobao.com/',
+    'https://www.cloudflare.com/','https://www.microsoft.com/'
+)
+$NtpServers = @('pool.ntp.org','time.windows.com','ntp.aliyun.com','ntp.tencent.com','ntp.ntsc.ac.cn')
+# SYSTEM 会话没有用户的 IE 代理设置，默认代理探测(WPAD)只会拖慢并失败。
+# 因此显式先直连；不通再试常见本地代理端口（Clash/Mihomo/V2Ray）。
+# 注意：这只影响本脚本自己发的请求，不会修改任何系统代理 / VPN 设置。
+$LocalProxies = @('http://127.0.0.1:7897','http://127.0.0.1:7890','http://127.0.0.1:10809')
+$HttpTimeoutMs = 2500
+$NtpTimeoutMs  = 1500
+# 总预算要小：本脚本每分钟触发一次，只需要精确到分钟，没必要为了几秒精度死磕。
+# 网络正常时命中第一个探针就返回（约 1-2 秒）；全挂时最多烧掉这么多就判定断网，
+# 再由 $OfflineGraceMinutes 决定要不要关机。
+$TimeBudgetMs  = 8000
+$SamplesWanted = 1            # 拿到 1 个可信来源就够，别为了交叉验证把耗时翻倍
+$MaxSampleSpreadMinutes = 5   # 万一顺手拿到 2 个：差太多说明有一个在胡说，整批作废
+$RejectStreakToReset = 10     # 连续这么多次判为“回拨”就重置锚点，防被脏数据永久锁死
 # ------------------------------------------------------------
 
 # 测试用环境变量（正常运行时都不设置）
-$TestForceWindow = ($env:BEDTIME_TEST_FORCE_WINDOW -eq '1')  # 强制视为"在关机窗口内"
+$TestForceWindow = ($env:BEDTIME_TEST_FORCE_WINDOW -eq '1')  # 强制视为“在关机窗口内”
 $TestNoShutdown  = ($env:BEDTIME_TEST_NOSHUTDOWN  -eq '1')   # 只记录不真正关机
+$TestForceOffline = ($env:BEDTIME_TEST_FORCE_OFFLINE -eq '1') # 强制视为取不到时间
 if ($env:BEDTIME_DELAY_MINUTES) { $DelayMinutes = [int]$env:BEDTIME_DELAY_MINUTES }
+if ($env:BEDTIME_OFFLINE_GRACE_MINUTES) { $OfflineGraceMinutes = [int]$env:BEDTIME_OFFLINE_GRACE_MINUTES }
+if ($env:BEDTIME_BOOT_GRACE_MINUTES)    { $BootGraceMinutes    = [int]$env:BEDTIME_BOOT_GRACE_MINUTES }
 
 $StateDir    = 'C:\ProgramData\BedtimeGuard'
+# 测试用：换个状态目录就能以普通用户跑全流程，不污染线上状态、也不需要管理员
+if ($env:BEDTIME_STATE_DIR) { $StateDir = $env:BEDTIME_STATE_DIR }
 $StateFile   = Join-Path $StateDir 'state.json'
 $RuntimeFile = Join-Path $StateDir 'runtime.json'
 $RequestFile = Join-Path $StateDir 'delay-request.flag'
@@ -42,41 +76,139 @@ function Invoke-AbortShutdown() {
 }
 function ConvertTo-Minutes([string]$hhmm) { $p = $hhmm.Split(':'); [int]$p[0] * 60 + [int]$p[1] }
 
-# 通过 NTP 取真实 UTC 时间（不依赖本地时钟）
-function Get-NtpUtc {
-    param([string[]]$Servers)
-    foreach ($server in $Servers) {
-        $socket = $null
-        try {
-            $ntpData = New-Object byte[] 48
-            $ntpData[0] = 0x1B                                  # LI=0, VN=3, Mode=3(client)
-            $addr = [System.Net.Dns]::GetHostAddresses($server) | Where-Object { $_.AddressFamily -eq 'InterNetwork' } | Select-Object -First 1
-            if (-not $addr) { continue }
-            $ipep   = New-Object System.Net.IPEndPoint($addr, 123)
-            $socket = New-Object System.Net.Sockets.Socket('InterNetwork','Dgram','Udp')
-            $socket.ReceiveTimeout = 2000
-            $socket.SendTimeout    = 2000
-            $socket.Connect($ipep)
-            [void]$socket.Send($ntpData)
-            [void]$socket.Receive($ntpData)
-            # 传输时间戳（Transmit Timestamp）从第 40 字节开始，大端序，1900 纪元
-            $intPart  = ([uint64]$ntpData[40] -shl 24) -bor ([uint64]$ntpData[41] -shl 16) -bor ([uint64]$ntpData[42] -shl 8) -bor [uint64]$ntpData[43]
-            $fracPart = ([uint64]$ntpData[44] -shl 24) -bor ([uint64]$ntpData[45] -shl 16) -bor ([uint64]$ntpData[46] -shl 8) -bor [uint64]$ntpData[47]
-            if ($intPart -eq 0) { continue }
-            $ms  = ($intPart * 1000.0) + (($fracPart * 1000.0) / 4294967296.0)
-            $utc = (New-Object DateTime(1900,1,1,0,0,0,[DateTimeKind]::Utc)).AddMilliseconds($ms)
-            if ($utc -gt (New-Object DateTime(2020,1,1,0,0,0,[DateTimeKind]::Utc))) { return $utc }
-        } catch { continue } finally { if ($socket) { $socket.Close() } }
-    }
+$MinSaneUtc = New-Object DateTime(2020,1,1,0,0,0,[DateTimeKind]::Utc)
+
+# 向单个 NTP 服务器要真实 UTC（不依赖本地时钟）。成功返回 DateTime，失败返回 $null。
+function Get-NtpUtcOne {
+    param([string]$Server)
+    $socket = $null
+    try {
+        $ntpData = New-Object byte[] 48
+        $ntpData[0] = 0x1B                                  # LI=0, VN=3, Mode=3(client)
+        $addr = [System.Net.Dns]::GetHostAddresses($Server) | Where-Object { $_.AddressFamily -eq 'InterNetwork' } | Select-Object -First 1
+        if (-not $addr) { return $null }
+        $ipep   = New-Object System.Net.IPEndPoint($addr, 123)
+        $socket = New-Object System.Net.Sockets.Socket('InterNetwork','Dgram','Udp')
+        $socket.ReceiveTimeout = $NtpTimeoutMs
+        $socket.SendTimeout    = $NtpTimeoutMs
+        $socket.Connect($ipep)
+        [void]$socket.Send($ntpData)
+        [void]$socket.Receive($ntpData)
+        # 传输时间戳（Transmit Timestamp）从第 40 字节开始，大端序，1900 纪元
+        $intPart  = ([uint64]$ntpData[40] -shl 24) -bor ([uint64]$ntpData[41] -shl 16) -bor ([uint64]$ntpData[42] -shl 8) -bor [uint64]$ntpData[43]
+        $fracPart = ([uint64]$ntpData[44] -shl 24) -bor ([uint64]$ntpData[45] -shl 16) -bor ([uint64]$ntpData[46] -shl 8) -bor [uint64]$ntpData[47]
+        if ($intPart -eq 0) { return $null }
+        $ms  = ($intPart * 1000.0) + (($fracPart * 1000.0) / 4294967296.0)
+        $utc = (New-Object DateTime(1900,1,1,0,0,0,[DateTimeKind]::Utc)).AddMilliseconds($ms)
+        if ($utc -gt $MinSaneUtc) { return $utc }
+    } catch { return $null } finally { if ($socket) { $socket.Close() } }
     return $null
 }
 
-# 开机以来的毫秒数，单调递增，改系统时钟无效，重启才归零
-# 用 QueryPerformanceCounter（Stopwatch），因为 .NET Framework 没有 TickCount64
+# 主通道：读 HTTPS 响应头里的 Date（RFC 7231 规定为 GMT）。
+# 走 443/TCP，代理和 VPN 都能正常转发；且经过 TLS 证书校验，比裸 NTP 难伪造。
+# 只做只读的 HEAD 请求，不修改任何系统代理 / VPN 设置。
+function Get-HttpDateUtc {
+    param([string]$Url, [string]$Proxy)
+    $dateHeader = $null
+    try {
+        $req = [System.Net.HttpWebRequest]::Create($Url)
+        $req.Method            = 'HEAD'
+        $req.Timeout           = $HttpTimeoutMs
+        $req.ReadWriteTimeout  = $HttpTimeoutMs
+        $req.AllowAutoRedirect = $false
+        $req.UserAgent         = 'BedtimeGuard'
+        # 关键：显式指定出口。留空会触发 WPAD 自动探测，SYSTEM 会话下又慢又必失败。
+        if ($Proxy) { $req.Proxy = New-Object System.Net.WebProxy($Proxy) } else { $req.Proxy = $null }
+        $resp = $req.GetResponse()
+        try { $dateHeader = $resp.Headers['Date'] } finally { $resp.Close() }
+    } catch [System.Net.WebException] {
+        # 4xx/5xx 的响应一样带 Date 头，照用
+        try { if ($_.Exception.Response) { $dateHeader = $_.Exception.Response.Headers['Date'] } } catch {}
+    } catch { return $null }
+    if (-not $dateHeader) { return $null }
+    try {
+        $styles = [System.Globalization.DateTimeStyles]::AdjustToUniversal -bor [System.Globalization.DateTimeStyles]::AssumeUniversal
+        $utc = [DateTime]::Parse($dateHeader, [System.Globalization.CultureInfo]::InvariantCulture, $styles)
+        if ($utc -gt $MinSaneUtc) { return [DateTime]::SpecifyKind($utc, [DateTimeKind]::Utc) }
+    } catch {}
+    return $null
+}
+
+# ------------------ 统一的取时间入口 ------------------
+# 实测教训：HTTPS 和 NTP 这两条通道【各自都会间歇性全挂】——同一台机器上，
+# 20:00 时 HTTPS 3/3 通、NTP 8/9 挂；20:08 时正好反过来。所以不能写死谁优先，
+# 而是【记住上次哪条通道 / 哪个出口成功，下次先试它】，失败再轮换。
+# 全程共用一个总预算：本脚本是每分钟触发的计划任务，必须一分钟内结束。
+$script:GoodProbe = $null
+function Get-TrustedUtcSamples {
+    param([string]$PreferredProbe)
+    try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}
+    $budget = [System.Diagnostics.Stopwatch]::StartNew()
+
+    # 探针清单：每项 = @{ Id; Kind; Target; Egress }
+    # Id 会被记进 state，下次优先复用。
+    $probes = @()
+    foreach ($url in $HttpTimeUrls) {
+        $h = ([Uri]$url).Host
+        $probes += @{ Id = "http|$url|direct"; Kind = 'http'; Target = $url; Egress = 'direct'; Label = "HTTP:$h(direct)" }
+    }
+    foreach ($srv in $NtpServers) {
+        $probes += @{ Id = "ntp|$srv"; Kind = 'ntp'; Target = $srv; Egress = ''; Label = "NTP:$srv" }
+    }
+    foreach ($px in $LocalProxies) {
+        foreach ($url in $HttpTimeUrls) {
+            $h = ([Uri]$url).Host
+            $probes += @{ Id = "http|$url|$px"; Kind = 'http'; Target = $url; Egress = $px; Label = "HTTP:$h($px)" }
+        }
+    }
+    # 上次成功的探针提到最前面
+    if ($PreferredProbe) {
+        $hit = @($probes | Where-Object { $_.Id -eq $PreferredProbe })
+        if ($hit.Count) { $probes = @($hit) + @($probes | Where-Object { $_.Id -ne $PreferredProbe }) }
+    }
+
+    $samples = @()
+    foreach ($pr in $probes) {
+        if ($budget.ElapsedMilliseconds -gt $TimeBudgetMs) {
+            Write-Log ("BUDGET 取时间用满 {0}ms，已拿到 {1} 个样本" -f $TimeBudgetMs, $samples.Count)
+            break
+        }
+        $utc = if ($pr.Kind -eq 'http') {
+            Get-HttpDateUtc -Url $pr.Target -Proxy $(if ($pr.Egress -eq 'direct') { $null } else { $pr.Egress })
+        } else {
+            Get-NtpUtcOne -Server $pr.Target
+        }
+        if ($utc) {
+            $samples += @{ Utc = $utc; Source = $pr.Label }
+            if (-not $script:GoodProbe) { $script:GoodProbe = $pr.Id }
+            if ($samples.Count -ge $SamplesWanted) { break }
+        }
+    }
+
+    if (-not $samples.Count) { return $null }
+    $sorted = @($samples | Sort-Object { $_.Utc })
+    if ($sorted.Count -ge 2) {
+        # 交叉校验：两个互不相关的来源不可能同时报出同一个错误时间。
+        # 差得太离谱说明有一个在胡说，宁可整批作废（按断网处理），
+        # 也不能让它污染 lastTrustedUtc —— 否则之后真实时间全被判成回拨，永久关机。
+        $spread = ($sorted[-1].Utc - $sorted[0].Utc).TotalMinutes
+        if ($spread -gt $MaxSampleSpreadMinutes) {
+            Write-Log ("REJECT 时间源互相矛盾 spread={0:N1}min [{1}] -> 整批作废" -f $spread, (($sorted | ForEach-Object { "$($_.Source)=$($_.Utc.ToString('HH:mm:ss'))" }) -join ', '))
+            return $null
+        }
+    }
+    # 取最大值：把时间往【早】了伪造需要同时骗过所有来源，成本更高
+    $best = $sorted[-1]
+    return @{ Utc = $best.Utc; Source = ("{0} n={1}" -f $best.Source, $sorted.Count); Count = $sorted.Count }
+}
+
+# 开机以来的毫秒数，单调递增，改系统时钟无效，重启才归零。
+# 仅用于「测量时长」（宽限期、延迟额度），绝不用来推算钟点。
 $tickNow = [int64]([System.Diagnostics.Stopwatch]::GetTimestamp() / [System.Diagnostics.Stopwatch]::Frequency * 1000.0)
 
 # 监护看门狗任务：若被删除则重建（与 Watchdog.ps1 互相监护，增加破解阻力）
-schtasks /query /tn 'BedtimeGuardWatchdog' *> $null
+if ($env:BEDTIME_STATE_DIR) { $LASTEXITCODE = 0 } else { schtasks /query /tn 'BedtimeGuardWatchdog' *> $null }
 if ($LASTEXITCODE -ne 0) {
     $wdTr = 'powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "C:\ProgramData\BedtimeGuard\Watchdog.ps1"'
     schtasks /create /tn 'BedtimeGuardWatchdog' /tr $wdTr /sc minute /mo 1 /ru SYSTEM /rl HIGHEST /f *> $null
@@ -85,62 +217,89 @@ if ($LASTEXITCODE -ne 0) {
     schtasks /change /tn 'BedtimeGuardWatchdog' /enable *> $null
 }
 
-# 读取已有锚点
+# 读取历史状态（上次可信时间 + 断网起点）
 $state = $null
 if (Test-Path $StateFile) {
     try { $state = Get-Content $StateFile -Raw | ConvertFrom-Json } catch { $state = $null }
 }
-
-$trustedUtc = $null
-$source     = ''
-
-$ntpUtc = Get-NtpUtc -Servers $NtpServers
-if ($ntpUtc) {
-    # 联网成功：这是最可信的时间，同时刷新锚点
-    $trustedUtc = $ntpUtc
-    $source     = 'NTP'
-    $state = [pscustomobject]@{
-        anchorUtc      = $ntpUtc.ToString('o')
-        anchorTick     = $tickNow
-        lastTrustedUtc = $ntpUtc.ToString('o')
-    }
-    try { $state | ConvertTo-Json | Set-Content -Path $StateFile -Encoding UTF8 } catch {}
+$lastTrustedUtc = [DateTime]::MinValue
+if ($state -and $state.lastTrustedUtc) {
+    try { $lastTrustedUtc = [DateTime]::Parse($state.lastTrustedUtc, $null, [System.Globalization.DateTimeStyles]::RoundtripKind) } catch {}
 }
-elseif ($state -and $state.anchorUtc) {
-    $anchorUtc = [DateTime]::Parse($state.anchorUtc, $null, [System.Globalization.DateTimeStyles]::RoundtripKind)
-    if ($tickNow -ge [int64]$state.anchorTick) {
-        # 同一次开机会话：用单调计时器推算真实时间（改本地时钟无效）
-        $elapsedMs  = $tickNow - [int64]$state.anchorTick
-        $trustedUtc = $anchorUtc.AddMilliseconds($elapsedMs)
-        $source     = 'ANCHOR'
-    } else {
-        # 计时器比锚点小 → 发生过重启，锚点失效，且当前断网无法校准
-        $source = 'REBOOT-OFFLINE'
-    }
-} else {
-    $source = 'NO-STATE'
+$offlineSinceTick = $null
+if ($state -and $null -ne $state.offlineSinceTick) {
+    try { $offlineSinceTick = [int64]$state.offlineSinceTick } catch {}
+}
+# 上次成功的探针（哪条通道 / 哪个站 / 哪个出口），下次优先试它，省掉整轮试错
+$lastGoodProbe = $null
+if ($state -and $state.lastGoodProbe) { $lastGoodProbe = [string]$state.lastGoodProbe }
+$rejectStreak = 0
+if ($state -and $state.rejectStreak) { try { $rejectStreak = [int]$state.rejectStreak } catch {} }
+
+# ---------------- 取真实时间：只认网络 ----------------
+$live = $null
+if (-not $TestForceOffline) {
+    $live = Get-TrustedUtcSamples -PreferredProbe $lastGoodProbe
 }
 
-# 无法取得可信时间时的兜底策略
-if (-not $trustedUtc) {
-    if ($OfflineRebootMode -eq 'require-network') {
-        if ($tickNow -lt ($BootGraceMinutes * 60000)) {
-            Write-Log ("WAIT source={0} mode=require-network 开机宽限期内({1}分钟)暂不关机，等待联网校准" -f $source, $BootGraceMinutes)
-            return
+# 防伪造：真实时间不可能大幅回拨。比上次可信时间早太多 → 拒绝采信，按断网处理。
+if ($live -and $lastTrustedUtc -gt [DateTime]::MinValue) {
+    if ($live.Utc -lt $lastTrustedUtc.AddMinutes(-$MaxBackwardSkewMinutes)) {
+        $rejectStreak++
+        if ($rejectStreak -ge $RejectStreakToReset) {
+            # 连续这么多分钟所有来源都说“更早” —— 那更可能是锚点本身被脏数据顶到未来，
+            # 而不是全世界的时间服务器一起回拨。重置锚点自愈，否则会永久关机。
+            Write-Log ("ANCHOR-RESET 连续 {0} 次判为回拨，判定锚点 {1} 已损坏 -> 清空重来" -f $rejectStreak, $lastTrustedUtc.ToString('o'))
+            $lastTrustedUtc = [DateTime]::MinValue
+            $rejectStreak = 0
+        } else {
+            Write-Log ("REJECT 时间源回拨 source={0} got={1} lastTrusted={2} streak={3} -> 视为不可信" -f $live.Source, $live.Utc.ToString('o'), $lastTrustedUtc.ToString('o'), $rejectStreak)
+            $live = $null
         }
-        Write-Log "UNTRUSTED source=$source mode=require-network -> 强制关机（需联网校准后才能正常使用）"
-        Invoke-Shutdown $CountdownSeconds "无法校准真实时间，请连接网络后重新开机。系统将关机。"
+    } else { $rejectStreak = 0 }
+} elseif ($live) { $rejectStreak = 0 }
+
+if (-not $live) {
+    # 取不到可信时间。本地时钟一律不采信 —— 宁可关机，也不给「断网就随便熬」的口子。
+    if ($null -eq $offlineSinceTick -or $offlineSinceTick -gt $tickNow) {
+        # 没记录，或计时器比记录小（说明重启过）→ 从现在开始计断网时长
+        $offlineSinceTick = $tickNow
+    }
+    $offlineMs = $tickNow - $offlineSinceTick
+    try {
+        [pscustomobject]@{
+            lastTrustedUtc   = $(if ($lastTrustedUtc -gt [DateTime]::MinValue) { $lastTrustedUtc.ToString('o') } else { $null })
+            offlineSinceTick = $offlineSinceTick
+            lastGoodProbe    = $lastGoodProbe
+            rejectStreak     = $rejectStreak
+        } | ConvertTo-Json | Set-Content -Path $StateFile -Encoding UTF8
+    } catch {}
+
+    if ($tickNow -lt ($BootGraceMinutes * 60000)) {
+        Write-Log ("WAIT 开机宽限期内({0}分钟)，等待联网校准；offline={1}s" -f $BootGraceMinutes, [int]($offlineMs / 1000))
         return
     }
-    # trust-local：退回本地时钟，但不允许时间倒退到上次可信时间之前
-    $localUtc    = [DateTime]::UtcNow
-    $lastTrusted = [DateTime]::MinValue
-    if ($state -and $state.lastTrustedUtc) {
-        $lastTrusted = [DateTime]::Parse($state.lastTrustedUtc, $null, [System.Globalization.DateTimeStyles]::RoundtripKind)
+    if ($offlineMs -lt ($OfflineGraceMinutes * 60000)) {
+        Write-Log ("WAIT 联网失败 {0}s，未超过宽限 {1}分钟，暂不关机" -f [int]($offlineMs / 1000), $OfflineGraceMinutes)
+        return
     }
-    $trustedUtc = if ($localUtc -gt $lastTrusted) { $localUtc } else { $lastTrusted }
-    $source     = "FALLBACK-LOCAL($source)"
+    Write-Log ("UNTRUSTED 断网 {0}s 仍无法取得真实时间 -> 强制关机" -f [int]($offlineMs / 1000))
+    Invoke-Shutdown $CountdownSeconds ("无法联网校准真实时间（已断网 {0} 分钟），{1} 秒后关机。请连网后再使用。" -f [int]($offlineMs / 60000), $CountdownSeconds)
+    return
 }
+
+$trustedUtc = $live.Utc
+$source     = $live.Source
+if ($trustedUtc -gt $lastTrustedUtc) { $lastTrustedUtc = $trustedUtc }
+try {
+    [pscustomobject]@{
+        # 没有两源互证过就写 $null，别把 DateTime.MinValue 当锚点存进去
+        lastTrustedUtc   = $(if ($lastTrustedUtc -gt [DateTime]::MinValue) { $lastTrustedUtc.ToString('o') } else { $null })
+        offlineSinceTick = $null          # 联网成功，清掉断网计时
+        lastGoodProbe    = $(if ($script:GoodProbe) { $script:GoodProbe } else { $lastGoodProbe })
+        rejectStreak     = 0
+    } | ConvertTo-Json | Set-Content -Path $StateFile -Encoding UTF8
+} catch {}
 
 # 转北京时间（中国自 1991 年起无夏令时，固定 UTC+8）
 $beijing = $trustedUtc.AddHours(8)
@@ -152,7 +311,7 @@ $endM    = ConvertTo-Minutes $WindowEnd
 if ($startM -le $endM) { $inWindow = ($mins -ge $startM -and $mins -lt $endM) }
 else                   { $inWindow = ($mins -ge $startM -or  $mins -lt $endM) }
 
-# 计算今晚的关机起点、预警窗口和"今晚"标识。
+# 计算今晚的关机起点、预警窗口和“今晚”标识。
 # 例：23:45 开始关机，23:42-23:45 弹窗；凌晨归到前一晚，保证延迟额度按整晚计。
 $windowStartToday = $beijing.Date.AddMinutes($startM)
 if ($startM -le $endM) {
