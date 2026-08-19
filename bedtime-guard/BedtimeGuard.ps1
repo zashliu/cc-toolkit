@@ -11,12 +11,28 @@
 #  关机前有倒计时警告；配套弹窗器 Notify.ps1 提供“延迟15分钟”按钮
 # ============================================================
 
+[CmdletBinding()]
+param(
+    # 安装后的计划任务不传此参数；测试时用它执行一次后退出。
+    [switch]$Once
+)
+
+$CorePath = Join-Path $PSScriptRoot 'BedtimeGuard.Core.psm1'
+if (-not (Test-Path -LiteralPath $CorePath)) { throw "找不到 $CorePath" }
+$CoreModule = Import-Module -Name $CorePath -Force -PassThru
+$WindowStateCommand = $CoreModule.ExportedCommands['Get-WindowState']
+if (-not $WindowStateCommand) { throw '核心窗口函数未导出' }
+
 # ------------------------- 可配置项 -------------------------
 $WindowStart       = '23:45'  # 关机窗口起点（北京时间，含）
 $WindowEnd         = '06:00'  # 关机窗口终点（北京时间，不含）
 $CountdownSeconds  = 180      # 关机前倒计时秒数
 $WarningLeadSeconds = 180     # 提前多少秒弹出“延迟15分钟”窗口
 $DelayMinutes      = 15       # 延迟时长（分钟）
+$PollIntervalSeconds = 30     # 常驻守护轮询间隔；不依赖系统墙上时钟
+# 「今晚临时顺延」的上限。必须有上限：顺延过头会让 startM 越过 $WindowEnd，
+# 窗口判断翻转成“全天关机”。默认 2 小时，23:45 最多顺到 01:45。
+$MaxTonightShiftMinutes = 120
 
 # —— 断网策略：取不到真实时间就关机 ——
 $BootGraceMinutes    = 5      # 开机后给网络就绪的宽限期，此期间联不上网不关机
@@ -60,8 +76,16 @@ $StateDir    = 'C:\ProgramData\BedtimeGuard'
 if ($env:BEDTIME_STATE_DIR) { $StateDir = $env:BEDTIME_STATE_DIR }
 $StateFile   = Join-Path $StateDir 'state.json'
 $RuntimeFile = Join-Path $StateDir 'runtime.json'
-$RequestFile = Join-Path $StateDir 'delay-request.flag'
+$RequestDir  = Join-Path $StateDir 'requests'
+$RequestFile = Join-Path $RequestDir 'delay-request.flag'
+$TonightFile = Join-Path $StateDir 'tonight.json'   # 一次性顺延，见下方 TONIGHT-SHIFT
 $LogFile     = Join-Path $StateDir 'guard.log'
+
+# 安装脚本会预先创建并锁定这些目录；测试模式使用临时目录时由执行器补建。
+try {
+    New-Item -ItemType Directory -Path $StateDir -Force -ErrorAction SilentlyContinue | Out-Null
+    New-Item -ItemType Directory -Path $RequestDir -Force -ErrorAction SilentlyContinue | Out-Null
+} catch {}
 
 function Write-Log([string]$msg) {
     try { Add-Content -Path $LogFile -Value ("{0}  {1}" -f (Get-Date).ToString('o'), $msg) -ErrorAction SilentlyContinue } catch {}
@@ -203,19 +227,14 @@ function Get-TrustedUtcSamples {
     return @{ Utc = $best.Utc; Source = ("{0} n={1}" -f $best.Source, $sorted.Count); Count = $sorted.Count }
 }
 
-# 开机以来的毫秒数，单调递增，改系统时钟无效，重启才归零。
-# 仅用于「测量时长」（宽限期、延迟额度），绝不用来推算钟点。
-$tickNow = [int64]([System.Diagnostics.Stopwatch]::GetTimestamp() / [System.Diagnostics.Stopwatch]::Frequency * 1000.0)
-
-# 监护看门狗任务：若被删除则重建（与 Watchdog.ps1 互相监护，增加破解阻力）
-if ($env:BEDTIME_STATE_DIR) { $LASTEXITCODE = 0 } else { schtasks /query /tn 'BedtimeGuardWatchdog' *> $null }
-if ($LASTEXITCODE -ne 0) {
-    $wdTr = 'powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "C:\ProgramData\BedtimeGuard\Watchdog.ps1"'
-    schtasks /create /tn 'BedtimeGuardWatchdog' /tr $wdTr /sc minute /mo 1 /ru SYSTEM /rl HIGHEST /f *> $null
-    Write-Log '看门狗任务缺失 -> 已重建 BedtimeGuardWatchdog'
-} else {
-    schtasks /change /tn 'BedtimeGuardWatchdog' /enable *> $null
+function Get-MonotonicMilliseconds {
+    # 开机以来的毫秒数，改系统时钟无效，重启才归零。
+    [int64]([System.Diagnostics.Stopwatch]::GetTimestamp() / [System.Diagnostics.Stopwatch]::Frequency * 1000.0)
 }
+
+function Invoke-GuardCycle {
+    # 单调计时器只用于测量宽限期/延迟时长，绝不用来推算北京时间。
+    $tickNow = Get-MonotonicMilliseconds
 
 # 读取历史状态（上次可信时间 + 断网起点）
 $state = $null
@@ -307,25 +326,42 @@ $mins    = $beijing.Hour * 60 + $beijing.Minute
 $startM  = ConvertTo-Minutes $WindowStart
 $endM    = ConvertTo-Minutes $WindowEnd
 
-# 判断是否在关机窗口内（窗口跨零点时 startM > endM）
-if ($startM -le $endM) { $inWindow = ($mins -ge $startM -and $mins -lt $endM) }
-else                   { $inWindow = ($mins -ge $startM -or  $mins -lt $endM) }
+# —— 今晚临时顺延（TONIGHT-SHIFT）——
+# tonight.json = { "nightId": "2026-08-07", "shiftMinutes": 60 }
+# 绑定到具体某一晚，过了这晚自动失效，不需要手动改回来。
+# 先用【原始】窗口算出“当前属于哪一晚”，否则顺延后的窗口会把日期算歪。
+$baseStartM = $startM
+$baseWindowStartToday = $beijing.Date.AddMinutes($baseStartM)
+if     ($baseStartM -le $endM) { $baseNightStart = $baseWindowStartToday }
+elseif ($mins -lt $endM)       { $baseNightStart = $baseWindowStartToday.AddDays(-1) }
+else                           { $baseNightStart = $baseWindowStartToday }
+$baseNightId = $baseNightStart.ToString('yyyy-MM-dd')
 
-# 计算今晚的关机起点、预警窗口和“今晚”标识。
-# 例：23:45 开始关机，23:42-23:45 弹窗；凌晨归到前一晚，保证延迟额度按整晚计。
-$windowStartToday = $beijing.Date.AddMinutes($startM)
-if ($startM -le $endM) {
-    $windowStartForNight = $windowStartToday
-} else {
-    if ($mins -lt $endM) { $windowStartForNight = $windowStartToday.AddDays(-1) }
-    else                 { $windowStartForNight = $windowStartToday }
+$shiftMinutes = 0
+if (Test-Path $TonightFile) {
+    try {
+        $tn = Get-Content $TonightFile -Raw | ConvertFrom-Json
+        if ([string]$tn.nightId -eq $baseNightId) {
+            $shiftMinutes = [int]$tn.shiftMinutes
+            if ($shiftMinutes -lt 0) { $shiftMinutes = 0 }
+            if ($shiftMinutes -gt $MaxTonightShiftMinutes) { $shiftMinutes = $MaxTonightShiftMinutes }
+        }
+    } catch {}
 }
-$secondsUntilWindowStart = [int][Math]::Ceiling(($windowStartForNight - $beijing).TotalSeconds)
-$inWarning = (-not $inWindow -and $secondsUntilWindowStart -gt 0 -and $secondsUntilWindowStart -le $WarningLeadSeconds)
+if ($shiftMinutes -gt 0) {
+    $startM = ($baseStartM + $shiftMinutes) % 1440
+    Write-Log ("TONIGHT-SHIFT night={0} +{1}min -> 关机窗口起点 {2:00}:{3:00}" -f $baseNightId, $shiftMinutes, [int]($startM / 60), ($startM % 60))
+}
 
-if ($inWindow -or $inWarning) {
-    $nightId = $windowStartForNight.ToString('yyyy-MM-dd')
-} else { $nightId = '' }
+# 判断是否在关机窗口内，并计算预警/今晚标识。
+# 例：23:45 开始关机，23:42-23:45 弹窗；凌晨归到前一晚，保证延迟额度按整晚计。
+$window = & $WindowStateCommand -Beijing $beijing -StartMinutes $startM -EndMinutes $endM `
+    -WarningLeadSeconds $WarningLeadSeconds -NightId $baseNightId
+$inWindow = $window.InWindow
+$inWarning = $window.InWarning
+$windowStartForNight = $window.WindowStartForNight
+$secondsUntilWindowStart = $window.SecondsUntilWindowStart
+$nightId = $window.NightId
 
 if ($TestForceWindow) { $inWindow = $true; $inWarning = $false; if (-not $nightId) { $nightId = $beijing.ToString('yyyy-MM-dd') } }
 
@@ -388,3 +424,26 @@ try {
         delayUsedNight = $delayUsedNight
     } | ConvertTo-Json | Set-Content -Path $RuntimeFile -Encoding UTF8
 } catch {}
+}
+
+# 计划任务只负责在开机时拉起本进程；真正的轮询由 Stopwatch + Sleep 驱动，
+# 因此运行期间修改 Windows 当前时间或时区不会让下一次检查消失。
+$mutexName = if ($env:BEDTIME_STATE_DIR) { "Global\BedtimeGuard.Test.$PID" } else { 'Global\BedtimeGuard' }
+$mutex = New-Object System.Threading.Mutex($false, $mutexName)
+$hasMutex = $false
+try {
+    $hasMutex = $mutex.WaitOne(0)
+    if (-not $hasMutex) { exit 0 }
+
+    do {
+        try {
+            Invoke-GuardCycle
+        } catch {
+            Write-Log ("CYCLE-ERROR {0}" -f $_.Exception.Message)
+        }
+        if (-not $Once) { Start-Sleep -Seconds $PollIntervalSeconds }
+    } while (-not $Once)
+} finally {
+    if ($hasMutex) { $mutex.ReleaseMutex() }
+    $mutex.Dispose()
+}

@@ -5,7 +5,7 @@
 
 和普通的定时关机脚本不同，它专门防住了自己会用的绕过手段：
 
-- **改本地系统时间无效**：本地时钟**完全不参与判断**。每分钟联网问一次真实时间，
+- **改本地系统时间无效**：本地时钟**完全不参与判断**。常驻 SYSTEM 执行器每 30 秒联网问一次真实时间，
   两条通道任选其一——HTTPS 响应头的 `Date`（443/TCP）或 NTP（123/UDP）。系统时钟随便改，无效。
 - **断网无效**：取不到真实时间 = 不知道现在几点 = **按最坏情况处理，直接关机**（有宽限期防误杀）。
   早期版本会在断网时用「单调计时器 + 上次联网锚点」推算钟点，但**断网 + 重启**会让锚点冻结，
@@ -24,8 +24,8 @@
   `lastGoodProbe`，下次优先复用，失败再轮换。
 - SYSTEM 会话没有用户的 IE 代理设置，`HttpWebRequest` 默认会触发 **WPAD 自动探测**——又慢又必失败。
   因此代码显式 `$req.Proxy = $null`（直连），不通再依次试常见本地代理端口。
-- 全流程有 `$TimeBudgetMs`（默认 8 秒）总预算。没有它，「N 个站 × M 个出口」会乘出**分钟级**耗时，
-  而任务是每分钟触发一次。命中缓存的探针时通常 **1–3 秒**返回。
+- 全流程有 `$TimeBudgetMs`（默认 8 秒）总预算。没有它，「N 个站 × M 个出口」会产生过长阻塞；
+  命中缓存的探针时通常 **1–3 秒**返回。
 
 > 脚本只是**只读地问一下时间**，不修改任何系统代理 / VPN 设置（不动 `netsh winhttp`、
 > 不动注册表 `Internet Settings`、不动代理软件配置）。VPN 开着关着都能正常工作。
@@ -42,23 +42,24 @@ powershell -ExecutionPolicy Bypass -File .\bedtime-guard\Install.ps1
 脚本会（幂等，可重复运行）：
 
 1. 把脚本部署到 `C:\ProgramData\BedtimeGuard\`
-2. 注册 3 个每分钟触发的计划任务：
-   - `BedtimeGuard`（SYSTEM）——执行器：校准时间、到点关机
-   - `BedtimeGuardWatchdog`（SYSTEM）——看门狗：与执行器**互相监护**，删/禁其一，另一个 1 分钟内重建
+2. 注册 3 个计划任务：
+   - `BedtimeGuard`（SYSTEM）——开机启动的常驻执行器：校准时间、到点关机
+   - `BedtimeGuardWatchdog`（SYSTEM）——开机启动的常驻看门狗：持续监护执行器并在退出后重启
    - `BedtimeGuardNotify`（当前用户会话）——弹窗器：显示延迟弹窗（仅 23:00–06:30 运行，wscript 隐藏启动不闪窗）
 
 ## 使用
 
 默认 23:42 左右：桌面弹出提醒。点「延迟 15 分钟」会把 23:45 的关机点顺延到约 00:00；不管它则 23:45 进入 180 秒倒计时并自动关机。
-即使 `shutdown /a` 取消，下一分钟会再次触发。
+即使 `shutdown /a` 取消，常驻执行器也会在下一轮检查时再次触发。
 
 ## 配置
 
-改 `bedtime-guard/BedtimeGuard.ps1` 顶部（改完重跑 Install 或直接改 `C:\ProgramData\BedtimeGuard\BedtimeGuard.ps1`，下一分钟自动生效）：
+改 `bedtime-guard/BedtimeGuard.ps1` 顶部后重跑 Install；常驻执行器会在重新启动后加载新配置。
 
 | 变量 | 默认 | 说明 |
 |------|------|------|
 | `$WindowStart` / `$WindowEnd` | `23:45` / `06:00` | 关机窗口（北京时间，跨零点自动处理） |
+| `$PollIntervalSeconds` | `30` | 常驻执行器轮询间隔；使用单调计时器，不受系统时间修改影响 |
 | `$CountdownSeconds` | `180` | 关机前倒计时秒数 |
 | `$WarningLeadSeconds` | `180` | 提前弹出延迟窗口的秒数 |
 | `$DelayMinutes` | `15` | 延迟时长 |
@@ -84,8 +85,12 @@ powershell -ExecutionPolicy Bypass -File .\bedtime-guard\Uninstall.ps1   # 需�
 ## 设计说明 / 局限
 
 - **弹窗为什么单独一个任务**：SYSTEM 任务运行在会话 0，无法在用户桌面弹窗；故执行器（SYSTEM）只写
-  `runtime.json` 决策，弹窗器在用户会话读它显示 WinForms 窗口，点延迟写 `delay-request.flag`，
+  `runtime.json` 决策，弹窗器在用户会话读它显示 WinForms 窗口，点延迟写 `requests\delay-request.flag`，
   执行器读到后延迟并 `shutdown /a` 中止。**杀掉弹窗器只会失去延迟功能，执行器照常关机**（激励对齐）。
+- **权限隔离**：安装时 `C:\ProgramData\BedtimeGuard` 只允许 SYSTEM/Administrators 修改；普通用户只能读取执行器文件，
+  并只能向独立的 `requests` inbox 提交延迟请求。通知标记保存在当前用户的 LocalAppData，不能污染执行器状态。
+- **改时间后仍会工作**：执行器和看门狗由开机触发并保持常驻，轮询和倒计时使用单调计时器；修改当前时间、时区或重启后拨回时间，
+  都不会让计划任务等待到错误的墙上时间。
 - **自锁保护**：`lastTrustedUtc` 是防回拨的锚点。万一某个站点返回一个远未来的 `Date` 把锚点顶飞，
   之后所有真实时间都会被判成“回拨”→ 无限关机循环。故加了 `$RejectStreakToReset`：连续 10 次全被拒，
   就认定是锚点自己坏了而不是全世界的时间服务器一起回拨，清空锚点自愈。
@@ -110,6 +115,6 @@ powershell -ExecutionPolicy Bypass -File .\bedtime-guard\Uninstall.ps1   # 需�
 
 ```powershell
 $env:BEDTIME_STATE_DIR="$env:TEMP\bgtest"; $env:BEDTIME_TEST_NOSHUTDOWN='1'
-powershell -ExecutionPolicy Bypass -File .\bedtime-guard\BedtimeGuard.ps1
+powershell -ExecutionPolicy Bypass -File .\bedtime-guard\BedtimeGuard.ps1 -Once
 Get-Content "$env:TEMP\bgtest\guard.log"
 ```
