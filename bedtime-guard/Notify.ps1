@@ -7,10 +7,13 @@ Add-Type -AssemblyName System.Drawing
 
 $Dir         = 'C:\ProgramData\BedtimeGuard'
 $RuntimeFile = Join-Path $Dir 'runtime.json'
-$RequestFile = Join-Path $Dir 'delay-request.flag'
-$MarkerFile  = Join-Path $Dir ("notify-shown-{0}.txt" -f $env:USERNAME)
+$RequestDir  = Join-Path $Dir 'requests'
+$RequestFile = Join-Path $RequestDir 'delay-request.flag'
+$MarkerDir   = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'BedtimeGuard'
+$MarkerFile  = Join-Path $MarkerDir ("notify-shown-{0}.txt" -f $env:USERNAME)
 
 if (-not (Test-Path $RuntimeFile)) { return }
+if (-not (Test-Path $RequestDir)) { return }
 try { $rt = Get-Content $RuntimeFile -Raw | ConvertFrom-Json } catch { return }
 
 $notifyActive = ($rt.inWindow -or $rt.inWarning)
@@ -84,4 +87,5 @@ if ($rt.delayAvailable) {
     $owner.Close()
 }
 
+New-Item -ItemType Directory -Path $MarkerDir -Force -ErrorAction SilentlyContinue | Out-Null
 Set-Content -Path $MarkerFile -Value $key -Encoding UTF8
