@@ -8,7 +8,7 @@
 #   - 取不到真实时间（断网 / UDP 被封 / DNS 被改）→ 过宽限期直接关机
 #   - 拿到的时间若比上次可信时间明显回拨 → 视为伪造，拒绝采信
 #
-#  关机前有倒计时警告；配套弹窗器 Notify.ps1 提供“延迟15分钟”按钮
+#  关机前 3 分钟提醒保存；到点立即关机，不提供任何顺延入口
 # ============================================================
 
 [CmdletBinding()]
@@ -26,13 +26,8 @@ if (-not $WindowStateCommand) { throw '核心窗口函数未导出' }
 # ------------------------- 可配置项 -------------------------
 $WindowStart       = '23:45'  # 关机窗口起点（北京时间，含）
 $WindowEnd         = '06:00'  # 关机窗口终点（北京时间，不含）
-$CountdownSeconds  = 180      # 关机前倒计时秒数
-$WarningLeadSeconds = 180     # 提前多少秒弹出“延迟15分钟”窗口
-$DelayMinutes      = 15       # 延迟时长（分钟）
+$WarningLeadSeconds = 180     # 提前多少秒弹出保存提醒
 $PollIntervalSeconds = 30     # 常驻守护轮询间隔；不依赖系统墙上时钟
-# 「今晚临时顺延」的上限。必须有上限：顺延过头会让 startM 越过 $WindowEnd，
-# 窗口判断翻转成“全天关机”。默认 2 小时，23:45 最多顺到 01:45。
-$MaxTonightShiftMinutes = 120
 
 # —— 断网策略：取不到真实时间就关机 ——
 $BootGraceMinutes    = 5      # 开机后给网络就绪的宽限期，此期间联不上网不关机
@@ -67,7 +62,6 @@ $RejectStreakToReset = 10     # 连续这么多次判为“回拨”就重置锚
 $TestForceWindow = ($env:BEDTIME_TEST_FORCE_WINDOW -eq '1')  # 强制视为“在关机窗口内”
 $TestNoShutdown  = ($env:BEDTIME_TEST_NOSHUTDOWN  -eq '1')   # 只记录不真正关机
 $TestForceOffline = ($env:BEDTIME_TEST_FORCE_OFFLINE -eq '1') # 强制视为取不到时间
-if ($env:BEDTIME_DELAY_MINUTES) { $DelayMinutes = [int]$env:BEDTIME_DELAY_MINUTES }
 if ($env:BEDTIME_OFFLINE_GRACE_MINUTES) { $OfflineGraceMinutes = [int]$env:BEDTIME_OFFLINE_GRACE_MINUTES }
 if ($env:BEDTIME_BOOT_GRACE_MINUTES)    { $BootGraceMinutes    = [int]$env:BEDTIME_BOOT_GRACE_MINUTES }
 
@@ -76,27 +70,22 @@ $StateDir    = 'C:\ProgramData\BedtimeGuard'
 if ($env:BEDTIME_STATE_DIR) { $StateDir = $env:BEDTIME_STATE_DIR }
 $StateFile   = Join-Path $StateDir 'state.json'
 $RuntimeFile = Join-Path $StateDir 'runtime.json'
-$RequestDir  = Join-Path $StateDir 'requests'
-$RequestFile = Join-Path $RequestDir 'delay-request.flag'
-$TonightFile = Join-Path $StateDir 'tonight.json'   # 一次性顺延，见下方 TONIGHT-SHIFT
 $LogFile     = Join-Path $StateDir 'guard.log'
 
 # 安装脚本会预先创建并锁定这些目录；测试模式使用临时目录时由执行器补建。
 try {
     New-Item -ItemType Directory -Path $StateDir -Force -ErrorAction SilentlyContinue | Out-Null
-    New-Item -ItemType Directory -Path $RequestDir -Force -ErrorAction SilentlyContinue | Out-Null
 } catch {}
 
 function Write-Log([string]$msg) {
-    try { Add-Content -Path $LogFile -Value ("{0}  {1}" -f (Get-Date).ToString('o'), $msg) -ErrorAction SilentlyContinue } catch {}
+    try {
+        $tick = [int64]([System.Diagnostics.Stopwatch]::GetTimestamp() / [System.Diagnostics.Stopwatch]::Frequency * 1000.0)
+        Add-Content -Path $LogFile -Value ("tick={0}  {1}" -f $tick, $msg) -ErrorAction SilentlyContinue
+    } catch {}
 }
-function Invoke-Shutdown([int]$secs, [string]$msg) {
-    if ($TestNoShutdown) { Write-Log "TEST 模拟关机(未真正执行) t=$secs"; return }
-    shutdown /s /f /t $secs /c $msg 2>$null
-}
-function Invoke-AbortShutdown() {
-    if ($TestNoShutdown) { return }
-    shutdown /a 2>$null
+function Invoke-ShutdownNow([string]$msg) {
+    if ($TestNoShutdown) { Write-Log 'TEST 模拟立即关机(未真正执行) t=0'; return }
+    shutdown /s /f /t 0 /c $msg 2>$null
 }
 function ConvertTo-Minutes([string]$hhmm) { $p = $hhmm.Split(':'); [int]$p[0] * 60 + [int]$p[1] }
 
@@ -257,7 +246,18 @@ if ($state -and $state.rejectStreak) { try { $rejectStreak = [int]$state.rejectS
 
 # ---------------- 取真实时间：只认网络 ----------------
 $live = $null
-if (-not $TestForceOffline) {
+if ($Once -and $env:BEDTIME_STATE_DIR -and $env:BEDTIME_TEST_TRUSTED_UTC) {
+    try {
+        $testUtc = [DateTime]::Parse(
+            $env:BEDTIME_TEST_TRUSTED_UTC,
+            [System.Globalization.CultureInfo]::InvariantCulture,
+            [System.Globalization.DateTimeStyles]::AdjustToUniversal -bor [System.Globalization.DateTimeStyles]::AssumeUniversal
+        ).ToUniversalTime()
+        $live = @{ Utc = $testUtc; Source = 'TEST:injected-utc'; Count = 1 }
+    } catch {
+        throw 'BEDTIME_TEST_TRUSTED_UTC 必须是有效的 UTC 时间；且只允许与 -Once 和 BEDTIME_STATE_DIR 一起使用'
+    }
+} elseif (-not $TestForceOffline) {
     $live = Get-TrustedUtcSamples -PreferredProbe $lastGoodProbe
 }
 
@@ -302,8 +302,8 @@ if (-not $live) {
         Write-Log ("WAIT 联网失败 {0}s，未超过宽限 {1}分钟，暂不关机" -f [int]($offlineMs / 1000), $OfflineGraceMinutes)
         return
     }
-    Write-Log ("UNTRUSTED 断网 {0}s 仍无法取得真实时间 -> 强制关机" -f [int]($offlineMs / 1000))
-    Invoke-Shutdown $CountdownSeconds ("无法联网校准真实时间（已断网 {0} 分钟），{1} 秒后关机。请连网后再使用。" -f [int]($offlineMs / 60000), $CountdownSeconds)
+    Write-Log ("UNTRUSTED 断网 {0}s 仍无法取得真实时间 -> 立即关机" -f [int]($offlineMs / 1000))
+    Invoke-ShutdownNow ("无法联网校准真实时间（已断网 {0} 分钟），系统立即关机。请连网后再使用。" -f [int]($offlineMs / 60000))
     return
 }
 
@@ -326,102 +326,44 @@ $mins    = $beijing.Hour * 60 + $beijing.Minute
 $startM  = ConvertTo-Minutes $WindowStart
 $endM    = ConvertTo-Minutes $WindowEnd
 
-# —— 今晚临时顺延（TONIGHT-SHIFT）——
-# tonight.json = { "nightId": "2026-08-07", "shiftMinutes": 60 }
-# 绑定到具体某一晚，过了这晚自动失效，不需要手动改回来。
-# 先用【原始】窗口算出“当前属于哪一晚”，否则顺延后的窗口会把日期算歪。
-$baseStartM = $startM
-$baseWindowStartToday = $beijing.Date.AddMinutes($baseStartM)
-if     ($baseStartM -le $endM) { $baseNightStart = $baseWindowStartToday }
-elseif ($mins -lt $endM)       { $baseNightStart = $baseWindowStartToday.AddDays(-1) }
-else                           { $baseNightStart = $baseWindowStartToday }
-$baseNightId = $baseNightStart.ToString('yyyy-MM-dd')
+# 计算当前所属夜晚。凌晨归到前一晚，只用于通知去重；不允许任何顺延。
+$windowStartToday = $beijing.Date.AddMinutes($startM)
+if     ($startM -le $endM) { $nightStart = $windowStartToday }
+elseif ($mins -lt $endM)   { $nightStart = $windowStartToday.AddDays(-1) }
+else                       { $nightStart = $windowStartToday }
+$baseNightId = $nightStart.ToString('yyyy-MM-dd')
 
-$shiftMinutes = 0
-if (Test-Path $TonightFile) {
-    try {
-        $tn = Get-Content $TonightFile -Raw | ConvertFrom-Json
-        if ([string]$tn.nightId -eq $baseNightId) {
-            $shiftMinutes = [int]$tn.shiftMinutes
-            if ($shiftMinutes -lt 0) { $shiftMinutes = 0 }
-            if ($shiftMinutes -gt $MaxTonightShiftMinutes) { $shiftMinutes = $MaxTonightShiftMinutes }
-        }
-    } catch {}
-}
-if ($shiftMinutes -gt 0) {
-    $startM = ($baseStartM + $shiftMinutes) % 1440
-    Write-Log ("TONIGHT-SHIFT night={0} +{1}min -> 关机窗口起点 {2:00}:{3:00}" -f $baseNightId, $shiftMinutes, [int]($startM / 60), ($startM % 60))
-}
-
-# 判断是否在关机窗口内，并计算预警/今晚标识。
-# 例：23:45 开始关机，23:42-23:45 弹窗；凌晨归到前一晚，保证延迟额度按整晚计。
+# 判断是否在关机窗口内，并计算提前提醒状态。
 $window = & $WindowStateCommand -Beijing $beijing -StartMinutes $startM -EndMinutes $endM `
     -WarningLeadSeconds $WarningLeadSeconds -NightId $baseNightId
 $inWindow = $window.InWindow
 $inWarning = $window.InWarning
-$windowStartForNight = $window.WindowStartForNight
 $secondsUntilWindowStart = $window.SecondsUntilWindowStart
 $nightId = $window.NightId
 
 if ($TestForceWindow) { $inWindow = $true; $inWarning = $false; if (-not $nightId) { $nightId = $beijing.ToString('yyyy-MM-dd') } }
 
-# 读取运行时状态（延迟额度）
-$delayUntilTick = 0; $delayUsedNight = ''
-if (Test-Path $RuntimeFile) {
-    try { $rt = Get-Content $RuntimeFile -Raw | ConvertFrom-Json; $delayUntilTick = [int64]$rt.delayUntilTick; $delayUsedNight = [string]$rt.delayUsedNight } catch {}
-}
-
-$delaying = $false
-
-if ($inWindow -or $inWarning) {
-    if ($delayUntilTick -gt 0 -and $tickNow -lt $delayUntilTick) {
-        # 延迟进行中：不关机；清掉延迟期间产生的多余请求，避免到期时误判
-        $delaying = $true
-        if (Test-Path $RequestFile) { Remove-Item $RequestFile -Force -ErrorAction SilentlyContinue }
-        Write-Log ("DELAYING night={0} 剩余{1}秒" -f $nightId, [int](($delayUntilTick - $tickNow) / 1000))
-    }
-    elseif (Test-Path $RequestFile) {
-        # 收到延迟请求
-        Remove-Item $RequestFile -Force -ErrorAction SilentlyContinue
-        if ($delayUsedNight -ne $nightId) {
-            $extraUntilWindowMs = if ($inWarning) { [Math]::Max(0, $secondsUntilWindowStart * 1000) } else { 0 }
-            $delayUntilTick = $tickNow + $extraUntilWindowMs + ($DelayMinutes * 60000)
-            $delayUsedNight = $nightId
-            $delaying = $true
-            Invoke-AbortShutdown
-            Write-Log ("DELAY GRANTED {0}min night={1}" -f $DelayMinutes, $nightId)
-        } else {
-            Write-Log ("DELAY DENIED 今晚已用过 night={0} -> 关机" -f $nightId)
-            Invoke-Shutdown $CountdownSeconds ("睡觉时间到（北京时间 {0}），{1}秒后关机。今晚延迟机会已用完。" -f $beijing.ToString('HH:mm'), $CountdownSeconds)
-        }
-    }
-    elseif ($inWarning) {
-        Write-Log ("WARNING night={0} beijing={1} shutdownIn={2}s source={3}" -f $nightId, $beijing.ToString('HH:mm:ss'), $secondsUntilWindowStart, $source)
-    }
-    else {
-        # 到点且无延迟：武装/维持关机倒计时（重复调用不会重置已在进行的倒计时）
-        Write-Log ("SHUTDOWN-ARM night={0} beijing={1} source={2}" -f $nightId, $beijing.ToString('HH:mm:ss'), $source)
-        Invoke-Shutdown $CountdownSeconds ("睡觉时间到（北京时间 {0}），{1}秒后关机，请立即保存。" -f $beijing.ToString('HH:mm'), $CountdownSeconds)
-    }
+if ($inWindow) {
+    Write-Log ("SHUTDOWN-NOW night={0} beijing={1} trustedUtc={2} source={3}" -f $nightId, $beijing.ToString('HH:mm:ss'), $trustedUtc.ToString('o'), $source)
+    Invoke-ShutdownNow ("睡觉时间到（北京时间 {0}），系统立即关机。" -f $beijing.ToString('HH:mm'))
+} elseif ($inWarning) {
+    Write-Log ("WARNING night={0} beijing={1} shutdownIn={2}s trustedUtc={3} source={4}" -f $nightId, $beijing.ToString('HH:mm:ss'), $secondsUntilWindowStart, $trustedUtc.ToString('o'), $source)
 } else {
-    Write-Log ("OK source={0} beijing={1}" -f $source, $beijing.ToString('yyyy-MM-dd HH:mm:ss'))
+    Write-Log ("OK beijing={0} trustedUtc={1} source={2}" -f $beijing.ToString('yyyy-MM-dd HH:mm:ss'), $trustedUtc.ToString('o'), $source)
 }
 
-# 写运行时状态供弹窗器读取
-$delayAvailable = ($delayUsedNight -ne $nightId)
+# 写运行时状态供常驻弹窗器读取；不读取旧 runtime，因此 v2 延迟字段无法影响决策。
 try {
     [pscustomobject]@{
+        policyVersion  = 3
         updatedUtc     = $trustedUtc.ToString('o')
         tickNow        = $tickNow
         inWindow       = $inWindow
         inWarning      = $inWarning
         secondsUntilWindowStart = $secondsUntilWindowStart
-        delaying       = $delaying
-        delayAvailable = $delayAvailable
         nightId        = $nightId
         beijingHHmm    = $beijing.ToString('HH:mm')
-        delayUntilTick = $delayUntilTick
-        delayUsedNight = $delayUsedNight
+        shutdownHHmm   = $WindowStart
     } | ConvertTo-Json | Set-Content -Path $RuntimeFile -Encoding UTF8
 } catch {}
 }

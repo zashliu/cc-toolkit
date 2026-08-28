@@ -1,13 +1,13 @@
 ﻿# 安装 BedtimeGuard：注册三个计划任务
 #   BedtimeGuard         (SYSTEM)      —— 开机拉起常驻执行器：算时间、关机
 #   BedtimeGuardWatchdog (SYSTEM)      —— 开机拉起常驻看门狗：监护执行器
-#   BedtimeGuardNotify   (当前用户/交互)—— 弹窗器：显示"延迟15分钟"弹窗
+#   BedtimeGuardNotify   (当前用户/交互)—— 登录后常驻，只显示保存提醒
 # 需以【管理员】身份运行本脚本
 #Requires -RunAsAdministrator
 
 $ErrorActionPreference = 'Stop'
 $Dir      = 'C:\ProgramData\BedtimeGuard'
-$RequestDir = Join-Path $Dir 'requests'
+$LegacyRequestDir = Join-Path $Dir 'requests'
 $Guard    = Join-Path $Dir 'BedtimeGuard.ps1'
 $Watchdog = Join-Path $Dir 'Watchdog.ps1'
 $Notify   = Join-Path $Dir 'Notify.ps1'
@@ -19,6 +19,21 @@ function Invoke-Icacls([string[]]$Arguments) {
     & icacls.exe @Arguments | Out-Null
     if ($LASTEXITCODE -ne 0) { throw "设置 BedtimeGuard ACL 失败：$($Arguments -join ' ')" }
 }
+
+# Upgrade in place: stop the old watchdog first so it cannot revive the old guard
+# while files and task definitions are being replaced.
+foreach ($name in 'BedtimeGuardWatchdog','BedtimeGuard','BedtimeGuardNotify') {
+    $existingTask = Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
+    if ($existingTask) {
+        Disable-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue | Out-Null
+        Stop-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
+    }
+}
+Start-Sleep -Seconds 1
+$residentScriptPattern = '(?i)\\(?:BedtimeGuard|Watchdog|Notify)\.ps1(?:"|\s|$)'
+Get-CimInstance Win32_Process -Filter "Name = 'powershell.exe'" -ErrorAction SilentlyContinue |
+    Where-Object { $_.CommandLine -and $_.CommandLine -match $residentScriptPattern } |
+    ForEach-Object { Invoke-CimMethod -InputObject $_ -MethodName Terminate -ErrorAction SilentlyContinue | Out-Null }
 
 # 旧版本可能留下“Administrators 是所有者但没有 DACL”的文件；先接管并修复，
 # 否则 Copy-Item -Force 也无法更新已部署脚本。
@@ -41,7 +56,7 @@ foreach ($oldFile in (Get-ChildItem -LiteralPath $Dir -File -Force -ErrorAction 
 }
 
 if ($Src -and ($Src.TrimEnd('\') -ne $Dir.TrimEnd('\'))) {
-    foreach ($f in 'BedtimeGuard.ps1','BedtimeGuard.Core.psm1','Watchdog.ps1','Notify.ps1','NotifyHidden.vbs','Uninstall.ps1','Postpone-Tonight.ps1') {
+    foreach ($f in 'BedtimeGuard.ps1','BedtimeGuard.Core.psm1','Watchdog.ps1','Notify.ps1','NotifyHidden.vbs','Uninstall.ps1') {
         $s = Join-Path $Src $f
         if (Test-Path $s) { Copy-Item $s (Join-Path $Dir $f) -Force }
     }
@@ -50,12 +65,17 @@ if ($Src -and ($Src.TrimEnd('\') -ne $Dir.TrimEnd('\'))) {
 
 foreach ($f in $Guard, $Watchdog, $Notify) { if (-not (Test-Path $f)) { throw "找不到 $f" } }
 
-New-Item -ItemType Directory -Path $RequestDir -Force | Out-Null
-
-# 兼容旧版：把根目录中的延迟请求迁移到用户可写 inbox。
-$legacyRequest = Join-Path $Dir 'delay-request.flag'
-if (Test-Path $legacyRequest) {
-    Move-Item -LiteralPath $legacyRequest -Destination (Join-Path $RequestDir 'delay-request.flag') -Force
+# v3 完全取消顺延。只清理精确的旧路径，避免残留 runtime/tick 再次复活。
+foreach ($legacyFileName in 'delay-request.flag','tonight.json','Postpone-Tonight.ps1','runtime.json') {
+    $legacyFile = Join-Path $Dir $legacyFileName
+    if (Test-Path -LiteralPath $legacyFile) { Remove-Item -LiteralPath $legacyFile -Force }
+}
+$expectedLegacyRequestDir = [IO.Path]::GetFullPath('C:\ProgramData\BedtimeGuard\requests')
+if ([IO.Path]::GetFullPath($LegacyRequestDir) -ne $expectedLegacyRequestDir) {
+    throw "拒绝清理非预期路径：$LegacyRequestDir"
+}
+if (Test-Path -LiteralPath $LegacyRequestDir) {
+    Remove-Item -LiteralPath $LegacyRequestDir -Recurse -Force
 }
 
 # 新复制的文件也要显式设置文件级 ACL；目录继承标志不能替代文件级规则。
@@ -64,13 +84,9 @@ foreach ($appFile in (Get-ChildItem -LiteralPath $Dir -File -Force)) {
     Invoke-Icacls @($appFile.FullName, '/inheritance:r', '/grant:r', $systemFile, $adminsFile, $usersFile)
 }
 
-# 普通用户只能在此目录创建/写入延迟请求，不能修改执行器状态、脚本和顺延配置。
-$usersRequest = '*S-1-5-32-545:(OI)(CI)(W)'
-Invoke-Icacls @($RequestDir, '/inheritance:r', '/grant:r', $systemDir, $adminsDir, $usersRequest)
-
 $guardTr  = 'powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "{0}"' -f $Guard
 $wdTr     = 'powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "{0}"' -f $Watchdog
-# 用 wscript 隐藏启动，避免弹窗器每分钟闪现命令行窗口
+# 用 wscript 隐藏常驻通知进程
 $notifyTr = 'wscript.exe "{0}\NotifyHidden.vbs"' -f $Dir
 
 # 弹窗器要跑在交互用户会话里才能显示窗口
@@ -79,20 +95,16 @@ if (-not $interactiveUser) { $interactiveUser = "$env:USERDOMAIN\$env:USERNAME" 
 
 schtasks /create /tn 'BedtimeGuard'         /tr $guardTr  /sc onstart /ru SYSTEM /rl HIGHEST /f | Out-Null
 schtasks /create /tn 'BedtimeGuardWatchdog' /tr $wdTr     /sc onstart /ru SYSTEM /rl HIGHEST /f | Out-Null
-# 弹窗器只在夜间时段每分钟运行（23:00 起、持续 7.5 小时到次日 06:30），白天完全不启动
-schtasks /create /tn 'BedtimeGuardNotify'   /tr $notifyTr /sc daily /st 23:00 /ri 1 /du 0007:30 /ru $interactiveUser /rl LIMITED /it /f | Out-Null
+# 登录时拉起常驻提醒器；其轮询使用单调计时器，不依赖本地时钟。
+schtasks /create /tn 'BedtimeGuardNotify'   /tr $notifyTr /sc onlogon /ru $interactiveUser /rl LIMITED /it /f | Out-Null
 
-# 三个任务：允许电池供电时运行；执行器/看门狗不设运行时限
+# 三个任务都常驻：允许电池供电，不设运行时限，异常退出自动重启。
 foreach ($name in 'BedtimeGuard','BedtimeGuardWatchdog','BedtimeGuardNotify') {
     $t = Get-ScheduledTask -TaskName $name
     $t.Settings.DisallowStartIfOnBatteries = $false
     $t.Settings.StopIfGoingOnBatteries     = $false
     $t.Settings.StartWhenAvailable         = $true
-    if ($name -eq 'BedtimeGuardNotify') {
-        $t.Settings.ExecutionTimeLimit     = 'PT15M'
-    } else {
-        $t.Settings.ExecutionTimeLimit     = 'PT0S'
-    }
+    $t.Settings.ExecutionTimeLimit = 'PT0S'
     Set-ScheduledTask -TaskName $name -Settings $t.Settings | Out-Null
 }
 
@@ -100,18 +112,16 @@ foreach ($name in 'BedtimeGuard','BedtimeGuardWatchdog','BedtimeGuardNotify') {
 $residentSettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
     -StartWhenAvailable -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew `
     -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
-foreach ($name in 'BedtimeGuard','BedtimeGuardWatchdog') {
+foreach ($name in 'BedtimeGuard','BedtimeGuardWatchdog','BedtimeGuardNotify') {
     Set-ScheduledTask -TaskName $name -Settings $residentSettings | Out-Null
 }
-$notifySettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
-    -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Minutes 15) -MultipleInstances IgnoreNew
-Set-ScheduledTask -TaskName 'BedtimeGuardNotify' -Settings $notifySettings | Out-Null
 
-Write-Host "[OK] 已安装 3 个计划任务。执行器/看门狗将在开机时常驻运行，不依赖系统当前时间。" -ForegroundColor Green
-Write-Host "     关机窗口：北京时间 23:45–06:00；关机前 180 秒倒计时，可延迟 15 分钟(每晚一次)。" -ForegroundColor Green
+Write-Host "[OK] 已安装 3 个常驻任务，不依赖系统当前时间。" -ForegroundColor Green
+Write-Host "     关机窗口：北京时间 23:45–06:00；23:42 提醒保存，23:45 立即强制关机，不可顺延。" -ForegroundColor Green
 Write-Host "     交互弹窗用户：$interactiveUser" -ForegroundColor Green
 Start-ScheduledTask -TaskName 'BedtimeGuard'
 Start-ScheduledTask -TaskName 'BedtimeGuardWatchdog'
+Start-ScheduledTask -TaskName 'BedtimeGuardNotify'
 Start-Sleep -Seconds 4
 if (Test-Path (Join-Path $Dir 'guard.log')) {
     Write-Host "     最近日志：" -ForegroundColor Green

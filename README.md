@@ -134,9 +134,9 @@ powershell -ExecutionPolicy Bypass -File .\claude-plugins\restore-plugins.ps1
 
 ## bedtime-guard — 防熬夜强制关机（按北京时间，防改时间/断网绕过）
 
-到就寝时段（默认**北京时间 23:45–06:00**）自动强制关机。和普通定时关机不同，它防住了「手动改本地时间」和「临时断网」两种绕过：**本地时钟完全不参与判断**，每分钟联网取一次真实时间（HTTPS 的 `Date` 响应头 / NTP 两条通道自适应切换）；**取不到就按最坏情况关机**（有宽限期防误杀）。关机前 180 秒倒计时，并弹窗可**延迟 15 分钟（每晚一次）**保存工作。
+到就寝时段（默认**北京时间 23:45–06:00**）自动强制关机。SYSTEM 常驻执行器每 30 秒通过 HTTPS `Date` / NTP 获取真实 UTC，本地时间和时区完全不参与判断；取不到可信时间超过宽限期也会关机。
 
-> v2 移除了「断网时用单调计时器推算钟点」——那条路在**断网 + 重启**后会冻结，是个真实可用的漏洞。
+v3 采用严格模式：23:42 提醒保存，23:45 **零秒强制关机**。15 分钟延迟、今晚顺延、请求 inbox 和可取消倒计时均已删除，旧版单调延迟值也不能在重启后复活。
 
 ### 启用
 
@@ -146,11 +146,11 @@ powershell -ExecutionPolicy Bypass -File .\claude-plugins\restore-plugins.ps1
 powershell -ExecutionPolicy Bypass -File .\bedtime-guard\Install.ps1
 ```
 
-会部署脚本到 `C:\ProgramData\BedtimeGuard\` 并注册 3 个每分钟任务：执行器（SYSTEM，关机）、看门狗（SYSTEM，与执行器互相监护防删）、弹窗器（用户会话，仅夜间运行、隐藏不闪窗）。
+会部署脚本到 `C:\ProgramData\BedtimeGuard\` 并注册 3 个常驻任务：执行器和看门狗在开机时以 SYSTEM 启动，提醒器在用户登录时启动。三者的轮询均不依赖系统墙上时间。
 
 ### 使用与配置
 
-到点后桌面弹窗 + 倒计时，点「延迟 15 分钟」可顺延一次。窗口时段、倒计时、延迟时长等在 `bedtime-guard/BedtimeGuard.ps1` 顶部可配。卸载：`powershell -ExecutionPolicy Bypass -File .\bedtime-guard\Uninstall.ps1`（管理员）。
+提醒出现后应立即保存；到点没有顺延或取消入口。窗口时段和网络宽限等在 `bedtime-guard/BedtimeGuard.ps1` 顶部可配。卸载：`powershell -ExecutionPolicy Bypass -File .\bedtime-guard\Uninstall.ps1`（管理员）。
 
 详见 [`bedtime-guard/README.md`](bedtime-guard/README.md)。
 

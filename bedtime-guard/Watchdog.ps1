@@ -23,7 +23,10 @@ $GuardTr = 'powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypas
 $NotifyTr = 'wscript.exe "{0}"' -f $NotifyVbs
 
 function Write-Log([string]$msg) {
-    try { Add-Content -Path $LogFile -Value ("{0}  {1}" -f (Get-Date).ToString('o'), $msg) -ErrorAction SilentlyContinue } catch {}
+    try {
+        $tick = [int64]([System.Diagnostics.Stopwatch]::GetTimestamp() / [System.Diagnostics.Stopwatch]::Frequency * 1000.0)
+        Add-Content -Path $LogFile -Value ("tick={0}  {1}" -f $tick, $msg) -ErrorAction SilentlyContinue
+    } catch {}
 }
 
 function Ensure-GuardTask {
@@ -50,15 +53,27 @@ function Ensure-GuardTask {
 }
 
 function Ensure-NotifyTask {
+    $interactiveUser = (Get-CimInstance Win32_ComputerSystem).UserName
+    if (-not $interactiveUser) { return }
+
     schtasks /query /tn $NotifyTaskName *> $null
     if ($LASTEXITCODE -ne 0) {
-        foreach ($u in (Get-CimInstance Win32_ComputerSystem).UserName) {
-            if ($u) {
-                schtasks /create /tn $NotifyTaskName /tr $NotifyTr /sc daily /st 23:00 /ri 1 /du 0007:30 /ru $u /rl LIMITED /it /f *> $null
-                Write-Log ("WATCHDOG notify task missing -> recreated for {0}" -f $u)
-                break
-            }
-        }
+        schtasks /create /tn $NotifyTaskName /tr $NotifyTr /sc onlogon /ru $interactiveUser /rl LIMITED /it /f *> $null
+        Write-Log ("WATCHDOG notify task missing -> recreated as logon task for {0}" -f $interactiveUser)
+    } else {
+        schtasks /change /tn $NotifyTaskName /enable *> $null
+    }
+
+    $running = $false
+    try {
+        $running = @(
+            Get-CimInstance Win32_Process -Filter "Name = 'powershell.exe'" -ErrorAction Stop |
+                Where-Object { $_.CommandLine -and $_.CommandLine -match '(?i)\\Notify\.ps1(?:"|\s|$)' }
+        ).Count -gt 0
+    } catch {}
+    if (-not $running) {
+        Start-ScheduledTask -TaskName $NotifyTaskName -ErrorAction SilentlyContinue
+        Write-Log 'WATCHDOG notify process not running -> start requested'
     }
 }
 

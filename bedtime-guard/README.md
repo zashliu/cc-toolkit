@@ -1,120 +1,78 @@
-# bedtime-guard — 防熬夜强制关机（按北京时间，防改时间/断网绕过）
+# bedtime-guard v3 — 严格防熬夜强制关机
 
-到了就寝时段（默认**北京时间 23:45–06:00**）自动强制关机，帮你戒掉持续熬夜。
-关机前 3 分钟会先弹出可**延迟 15 分钟（每晚一次）**的窗口，方便保存手头工作；未延迟则到点进入 180 秒关机倒计时。
+默认在北京时间 **23:45–06:00** 强制关机。23:42 开始提醒保存，23:45 执行零秒强制关机；严格模式没有延迟按钮、今晚顺延或可取消倒计时。
 
-和普通的定时关机脚本不同，它专门防住了自己会用的绕过手段：
+## 防绕过机制
 
-- **改本地系统时间无效**：本地时钟**完全不参与判断**。常驻 SYSTEM 执行器每 30 秒联网问一次真实时间，
-  两条通道任选其一——HTTPS 响应头的 `Date`（443/TCP）或 NTP（123/UDP）。系统时钟随便改，无效。
-- **断网无效**：取不到真实时间 = 不知道现在几点 = **按最坏情况处理，直接关机**（有宽限期防误杀）。
-  早期版本会在断网时用「单调计时器 + 上次联网锚点」推算钟点，但**断网 + 重启**会让锚点冻结，
-  是个真实可用的漏洞；v2 已彻底移除该推算，单调计时器只用来量「过了多久」，不再用来推算「现在几点」。
-- **伪造时间源无效**：拿到的时间若比上次可信时间明显回拨，判为伪造并拒绝采信。
+- **不使用系统时间**：SYSTEM 常驻执行器每 30 秒通过 HTTPS `Date` 或 NTP 获取 UTC，再固定换算为 UTC+8。修改 Windows 时间、日期或时区不会改变判断。
+- **不依赖定时触发**：Guard 和 watchdog 在开机时启动后常驻；提醒器在用户登录时启动后常驻。轮询间隔使用单调计时器。
+- **断网不能绕过**：开机和瞬时网络故障各有 5 分钟宽限；超过宽限仍无法获得可信时间就立即关机。
+- **没有自助顺延**：v2 的请求 inbox、15 分钟延迟、`tonight.json` 和 `Postpone-Tonight.ps1` 已全部移除。
+- **旧状态不会复活**：Guard 从不读取 `runtime.json` 作决策。v3 runtime 只供提醒器读取，并带有版本号和单调新鲜度校验。
 
-> 代价要清楚：**断网超过宽限期就会关机，不分白天黑夜**。这是「不知道几点就当作是深夜」的必然结果 ——
-> 断网时无法判断当前时刻，也就无法只在夜间执行。不接受的话把 `$OfflineGraceMinutes` 调大即可。
+v2 曾把单调计时截止值写入 runtime。重启后计时器从零开始，旧截止值可能碰巧大于本次开机时长，导致几周前的延迟在新的一晚复活。v3 删除了整条延迟状态机，从根源上修复该漏洞。
 
-## 网络可靠性（实测，别想当然）
+## 安装和升级
 
-在 Clash/Mihomo 这类 **TUN + fake-IP** 代理环境下（域名全解析到 `198.18.x.x`），实测发现：
-
-- 两条通道**各自都会整条间歇性挂掉**：同一台机器 20:00 时 HTTPS 3/3 通、NTP 8/9 超时；20:08 时正好反过来。
-- 所以脚本**不写死通道优先级**，而是把上次成功的探针（通道+站点+出口）记进 `state.json` 的
-  `lastGoodProbe`，下次优先复用，失败再轮换。
-- SYSTEM 会话没有用户的 IE 代理设置，`HttpWebRequest` 默认会触发 **WPAD 自动探测**——又慢又必失败。
-  因此代码显式 `$req.Proxy = $null`（直连），不通再依次试常见本地代理端口。
-- 全流程有 `$TimeBudgetMs`（默认 8 秒）总预算。没有它，「N 个站 × M 个出口」会产生过长阻塞；
-  命中缓存的探针时通常 **1–3 秒**返回。
-
-> 脚本只是**只读地问一下时间**，不修改任何系统代理 / VPN 设置（不动 `netsh winhttp`、
-> 不动注册表 `Internet Settings`、不动代理软件配置）。VPN 开着关着都能正常工作。
-
-## 启用
-
-需**管理员**运行（注册 SYSTEM 计划任务）：
+在管理员 PowerShell 中运行：
 
 ```powershell
-# 在仓库目录下，管理员 PowerShell：
 powershell -ExecutionPolicy Bypass -File .\bedtime-guard\Install.ps1
 ```
 
-脚本会（幂等，可重复运行）：
+安装器会停止旧版常驻进程、部署最新版、删除旧延迟文件、重建三个任务并启动：
 
-1. 把脚本部署到 `C:\ProgramData\BedtimeGuard\`
-2. 注册 3 个计划任务：
-   - `BedtimeGuard`（SYSTEM）——开机启动的常驻执行器：校准时间、到点关机
-   - `BedtimeGuardWatchdog`（SYSTEM）——开机启动的常驻看门狗：持续监护执行器并在退出后重启
-   - `BedtimeGuardNotify`（当前用户会话）——弹窗器：显示延迟弹窗（仅 23:00–06:30 运行，wscript 隐藏启动不闪窗）
+- `BedtimeGuard`：SYSTEM，开机常驻，获取可信时间并执行关机。
+- `BedtimeGuardWatchdog`：SYSTEM，开机常驻，修复并重启 Guard/提醒任务。
+- `BedtimeGuardNotify`：当前交互用户，登录常驻，只显示保存提醒。
 
-## 使用
+如果可信北京时间已经处于 23:45–06:00，启动 v3 Guard 会立即关机。升级应安排在 06:00 之后进行。
 
-默认 23:42 左右：桌面弹出提醒。点「延迟 15 分钟」会把 23:45 的关机点顺延到约 00:00；不管它则 23:45 进入 180 秒倒计时并自动关机。
-即使 `shutdown /a` 取消，常驻执行器也会在下一轮检查时再次触发。
+## 默认配置
 
-## 配置
+配置位于 `BedtimeGuard.ps1` 顶部。修改后重新运行安装器。
 
-改 `bedtime-guard/BedtimeGuard.ps1` 顶部后重跑 Install；常驻执行器会在重新启动后加载新配置。
+| 变量 | 默认值 | 说明 |
+|---|---:|---|
+| `$WindowStart` / `$WindowEnd` | `23:45` / `06:00` | 强制关机窗口，支持跨午夜 |
+| `$WarningLeadSeconds` | `180` | 提前提醒保存的秒数 |
+| `$PollIntervalSeconds` | `30` | Guard 轮询间隔 |
+| `$BootGraceMinutes` | `5` | 开机等待网络就绪的宽限 |
+| `$OfflineGraceMinutes` | `5` | 持续无法取得可信时间的宽限 |
+| `$TimeBudgetMs` | `8000` | 每轮联网取时总预算 |
+| `$MaxBackwardSkewMinutes` | `10` | 时间源允许的最大回拨 |
 
-| 变量 | 默认 | 说明 |
-|------|------|------|
-| `$WindowStart` / `$WindowEnd` | `23:45` / `06:00` | 关机窗口（北京时间，跨零点自动处理） |
-| `$PollIntervalSeconds` | `30` | 常驻执行器轮询间隔；使用单调计时器，不受系统时间修改影响 |
-| `$CountdownSeconds` | `180` | 关机前倒计时秒数 |
-| `$WarningLeadSeconds` | `180` | 提前弹出延迟窗口的秒数 |
-| `$DelayMinutes` | `15` | 延迟时长 |
-| `$BootGraceMinutes` | `5` | 开机宽限期，给网络就绪时间，避免开机误关 |
-| `$OfflineGraceMinutes` | `5` | 持续联不上网多久后关机。**嫌容易误关就调大这个** |
-| `$TimeBudgetMs` | `8000` | 每轮取时间的总耗时上限，超了就判定断网 |
-| `$SamplesWanted` | `1` | 需要几个来源。设 2 会做交叉校验但耗时翻倍 |
-| `$MaxBackwardSkewMinutes` | `10` | 允许比上次可信时间早多少分钟，超过判为伪造 |
-| `$MaxSampleSpreadMinutes` | `5` | 取到多个来源时，彼此相差超过这么久就整批作废 |
-| `$RejectStreakToReset` | `10` | 连续这么多次判为回拨就重置锚点（自愈，防被脏数据永久锁死） |
-| `$HttpTimeUrls` / `$NtpServers` / `$LocalProxies` | 见脚本 | 时间源与出口候选 |
+SYSTEM 会话优先直连时间源，失败后尝试脚本中列出的本地代理端口。脚本只读取时间，不修改代理、VPN、系统时间或时区。
 
-> ⚠️ 脚本含中文，必须存为 **UTF-8 with BOM**，否则 Windows PowerShell 5.1 会按 GBK 读取导致解析报错。`.vbs` 保持纯 ASCII（不加 BOM）。
+## runtime.json v3
 
-## 卸载
+`C:\ProgramData\BedtimeGuard\runtime.json` 只供提醒器读取：
 
-```powershell
-powershell -ExecutionPolicy Bypass -File .\bedtime-guard\Uninstall.ps1   # 需管理员
-```
+- `policyVersion: 3`
+- `updatedUtc`、`tickNow`
+- `inWindow`、`inWarning`、`secondsUntilWindowStart`
+- `nightId`、`beijingHHmm`、`shutdownHHmm`
 
-因两个 SYSTEM 任务互相重建，卸载脚本会连删几遍打断“复活”。
+其中不存在延迟截止值、延迟次数或用户请求字段。提醒器拒绝版本不是 3、跨重启或超过 120 秒未更新的 runtime。
 
-## 设计说明 / 局限
+## 验证
 
-- **弹窗为什么单独一个任务**：SYSTEM 任务运行在会话 0，无法在用户桌面弹窗；故执行器（SYSTEM）只写
-  `runtime.json` 决策，弹窗器在用户会话读它显示 WinForms 窗口，点延迟写 `requests\delay-request.flag`，
-  执行器读到后延迟并 `shutdown /a` 中止。**杀掉弹窗器只会失去延迟功能，执行器照常关机**（激励对齐）。
-- **权限隔离**：安装时 `C:\ProgramData\BedtimeGuard` 只允许 SYSTEM/Administrators 修改；普通用户只能读取执行器文件，
-  并只能向独立的 `requests` inbox 提交延迟请求。通知标记保存在当前用户的 LocalAppData，不能污染执行器状态。
-- **改时间后仍会工作**：执行器和看门狗由开机触发并保持常驻，轮询和倒计时使用单调计时器；修改当前时间、时区或重启后拨回时间，
-  都不会让计划任务等待到错误的墙上时间。
-- **自锁保护**：`lastTrustedUtc` 是防回拨的锚点。万一某个站点返回一个远未来的 `Date` 把锚点顶飞，
-  之后所有真实时间都会被判成“回拨”→ 无限关机循环。故加了 `$RejectStreakToReset`：连续 10 次全被拒，
-  就认定是锚点自己坏了而不是全世界的时间服务器一起回拨，清空锚点自愈。
-- **残留漏洞**：已堵住“改系统时间”“断网”“断网+重启”“单点伪造回拨”。真正的边界是——你是管理员，
-  铁了心提权删掉两个任务当然能停；能改 hosts / 自建时间源伪造 `Date` 也能骗过。本工具的目标是按
-  Fogg 行为模型**加大绕过阻力**，而不是做到绝对不可逆。
-- 中国自 1991 年起无夏令时，固定 UTC+8。
-
-## 测试用环境变量
-
-| 变量 | 作用 |
-|------|------|
-| `BEDTIME_TEST_FORCE_WINDOW=1` | 强制视为“在关机窗口内” |
-| `BEDTIME_TEST_NOSHUTDOWN=1` | 只记录不真正关机 |
-| `BEDTIME_TEST_FORCE_OFFLINE=1` | 强制视为取不到真实时间，用来测断网分支 |
-| `BEDTIME_DELAY_MINUTES=<n>` | 改延迟时长，便于测到期 |
-| `BEDTIME_OFFLINE_GRACE_MINUTES=<n>` | 改断网宽限，设 0 可立即触发关机分支 |
-| `BEDTIME_BOOT_GRACE_MINUTES=<n>` | 改开机宽限 |
-| `BEDTIME_STATE_DIR=<路径>` | 换状态目录：**普通用户就能跑全流程**，不碰线上状态、不需要管理员 |
-
-配好后一条命令就能本地验证（不会真关机）：
+测试不会真的关机：
 
 ```powershell
-$env:BEDTIME_STATE_DIR="$env:TEMP\bgtest"; $env:BEDTIME_TEST_NOSHUTDOWN='1'
-powershell -ExecutionPolicy Bypass -File .\bedtime-guard\BedtimeGuard.ps1 -Once
-Get-Content "$env:TEMP\bgtest\guard.log"
+powershell -NoProfile -ExecutionPolicy Bypass -File .\bedtime-guard\tests\Test-BedtimeGuard.ps1
 ```
+
+测试覆盖窗口边界、跨午夜、旧延迟复活、零秒关机、断网宽限、任务触发方式和 runtime v3 schema。
+
+测试专用的 `BEDTIME_TEST_TRUSTED_UTC` 只有同时使用 `-Once` 和非生产 `BEDTIME_STATE_DIR` 时才会生效，不能影响安装后的常驻任务。
+
+## 卸载和安全边界
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\bedtime-guard\Uninstall.ps1
+```
+
+当前日常账户仍是管理员，因此你最终仍能提权终止进程、删除任务、修改脚本或运行卸载器。本工具可以堵住改时间、改时区、断网、旧状态复活和自助顺延，但无法让掌握本机管理员凭据的人失去最终控制权。
+
+PowerShell 脚本中的中文文件需保持 UTF-8 BOM；`NotifyHidden.vbs` 保持纯 ASCII。
