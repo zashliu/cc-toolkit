@@ -1,8 +1,9 @@
 # =====================================================================
 # setup-notify.ps1
-# Plays a notification sound when Claude Code / Gemini CLI finishes a turn,
+# Plays a notification sound when Codex / Claude Code / Gemini CLI finishes a turn,
 # so you know to come back and check the result.
 #
+#   Codex       -> "notify" in ~/.codex/config.toml
 #   Claude Code -> "Stop" hook        (fires when the response ends)
 #   Gemini CLI  -> "AfterAgent" hook  (fires once per turn after final reply)
 #
@@ -185,5 +186,36 @@ if (Test-Path $geminiDir) {
 }
 
 Write-Host ""
-Write-Host "Done. RESTART Claude Code / Gemini CLI for the hook to load." -ForegroundColor Cyan
+
+# --- Codex CLI (~/.codex/config.toml, user-level "notify") -------------
+# Codex accepts a command array and appends a JSON notification payload to it.
+# Keep this at user level: project-local Codex config cannot override notify.
+$codexConfig = Join-Path (Join-Path $env:USERPROFILE '.codex') 'config.toml'
+if (Test-Path $codexConfig) {
+    $tomlSoundPath = $soundPs.Replace('\', '\\').Replace('"', '\"')
+    $notifyLine = 'notify = [ "powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden", "-File", "' + $tomlSoundPath + '" ]'
+    $tomlLines = @(Get-Content -LiteralPath $codexConfig)
+    $notifyIndexes = @(
+        0..($tomlLines.Count - 1) | Where-Object { $tomlLines[$_] -match '^\s*notify\s*=' }
+    )
+    if ($notifyIndexes.Count -gt 0) {
+        $tomlLines[$notifyIndexes[0]] = $notifyLine
+        if ($notifyIndexes.Count -gt 1) {
+            $tomlLines = @(
+                for ($i = 0; $i -lt $tomlLines.Count; $i++) {
+                    if ($notifyIndexes -notcontains $i -or $i -eq $notifyIndexes[0]) { $tomlLines[$i] }
+                }
+            )
+        }
+    } else {
+        $tomlLines += $notifyLine
+    }
+    [System.IO.File]::WriteAllLines($codexConfig, $tomlLines, (New-Object System.Text.UTF8Encoding($false)))
+    Write-Host "Added Codex notify -> $codexConfig" -ForegroundColor Green
+} else {
+    Write-Host "Codex CLI (~/.codex/config.toml) not found - skipped." -ForegroundColor Yellow
+}
+
+Write-Host ""
+Write-Host "Done. RESTART Codex / Claude Code / Gemini CLI for the notification settings to load." -ForegroundColor Cyan
 Write-Host "Test the sound now:  powershell -File `"$soundPs`"" -ForegroundColor Cyan

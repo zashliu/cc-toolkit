@@ -45,11 +45,12 @@ powershell -ExecutionPolicy Bypass -File .\setup-sharex-paste.ps1
 
 ---
 
-## notify — Claude Code / Gemini CLI 完成一轮输出时响铃提醒
+## notify — Codex / Claude Code / Gemini CLI 完成一轮输出时响铃提醒
 
-让 AI 跑完当前回答时发出提示音，方便你及时回来检查结果。原理是给两个 CLI 各挂一个
+让 AI 跑完当前回答时发出提示音，方便你及时回来检查结果。原理是给各个 CLI 挂一个
 "完成事件" hook，触发时播放一段系统提示音：
 
+- **Codex** → `~/.codex/config.toml` 的用户级 `notify`（收到通知时触发）
 - **Claude Code** → `~/.claude/settings.json` 的 `Stop` hook（回答结束时触发）
 - **Gemini CLI** → `~/.gemini/settings.json` 的 `AfterAgent` hook（每轮最终回复生成后触发）
 
@@ -62,9 +63,9 @@ powershell -ExecutionPolicy Bypass -File .\setup-notify.ps1
 脚本会自动（幂等，可重复运行）：
 
 1. 在 `%USERPROFILE%\.cc-notify\` 生成 `notify-sound.ps1`（播放系统提示音，stdout 只输出 `{}`）
-2. 把 hook 合并进 Claude Code 的 `settings.json`（`Stop`）和 Gemini CLI 的 `settings.json`（`AfterAgent`），
+2. 把通知配置合并进 Codex 的 `config.toml`，并把 hook 合并进 Claude Code 的 `settings.json`（`Stop`）和 Gemini CLI 的 `settings.json`（`AfterAgent`），
    保留原有配置，写回时不带 BOM（避免 JSON 解析失败）
-3. 只对检测到的 CLI 生效（`~/.claude` / `~/.gemini` 存在才改）
+3. 只对检测到的 CLI 生效（对应配置目录存在才改）
 
 > **改完需重启对应 CLI** 才能加载新 hook。
 
@@ -74,7 +75,7 @@ powershell -ExecutionPolicy Bypass -File .\setup-notify.ps1
 - Gemini hook 要求脚本 stdout **只能是 JSON**，所以响铃脚本播完声音输出 `{}`，不打印别的。
 - 卸载：编辑两个 `settings.json` 删掉对应的 hook 条目，并删除 `%USERPROFILE%\.cc-notify\`。
 
-> 同样是 OS / CLI 层面配置，不随账号同步，跨设备靠本仓库 + 每台机器跑一次安装脚本。
+> Codex 的 `notify` 是用户级配置，不能放进项目内的 `.codex/config.toml`。同样是 OS / CLI 层面配置，不随账号同步，跨设备靠本仓库 + 每台机器跑一次安装脚本。
 
 ---
 
